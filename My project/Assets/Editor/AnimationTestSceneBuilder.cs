@@ -10,7 +10,7 @@ using UnityEngine;
 public static class AnimationTestSceneBuilder
 {
     const string MixamoDir = "Assets/Animations/Mixamo";
-    const string CityDir = "Assets/DenysAlmaral/CityPeople";
+    const string CityDir = "Assets/ThirdParty/CityPeople";
     const string CityAnims = CityDir + "/Animations/";
     const string CityPrefabs = CityDir + "/Prefabs/";
 
