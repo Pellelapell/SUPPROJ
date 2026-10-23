@@ -38,7 +38,9 @@ public class AnimTestPlayer : MonoBehaviour
         transform.position += transform.forward * currentSpeed * dt;
         animator.SetFloat(SpeedId, currentSpeed);
 
-        if (Input.GetKeyDown(KeyCode.E) || Input.GetKeyDown(KeyCode.Space)) animator.SetTrigger(WaveId);
+        // Saluer seulement à l'arrêt, sinon le trigger reste en attente et se déclenche à l'arrêt suivant
+        bool wavePressed = Input.GetKeyDown(KeyCode.E) || Input.GetKeyDown(KeyCode.Space);
+        if (wavePressed && currentSpeed < 0.1f) animator.SetTrigger(WaveId);
     }
 
     // ZQSD (AZERTY), WASD (QWERTY) et flèches
@@ -66,7 +68,7 @@ public class AnimTestPlayer : MonoBehaviour
         GUILayout.BeginArea(new Rect(20f, 35f, 240f, 105f));
         GUILayout.Label("ZQSD / WASD / flèches : marcher");
         GUILayout.Label("Maj gauche : courir");
-        GUILayout.Label("E / Espace : saluer");
+        GUILayout.Label("E / Espace : saluer (à l'arrêt)");
         GUILayout.Label($"Speed = {currentSpeed:0.00}   État = {CurrentStateName()}");
         GUILayout.EndArea();
     }

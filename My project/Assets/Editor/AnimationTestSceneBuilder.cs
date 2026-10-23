@@ -10,9 +10,9 @@ using UnityEngine;
 public static class AnimationTestSceneBuilder
 {
     const string MixamoDir = "Assets/Animations/Mixamo";
-    const string CityDir = "Assets/ThirdParty/CityPeople";
+    internal const string CityDir = "Assets/ThirdParty/CityPeople";
     const string CityAnims = CityDir + "/Animations/";
-    const string CityPrefabs = CityDir + "/Prefabs/";
+    internal const string CityPrefabs = CityDir + "/Prefabs/";
 
     const string PlayerControllerPath = "Assets/Animations/TestCharacter.controller";
     const string ShowcaseControllerPath = "Assets/Animations/Showcase.controller";
@@ -20,7 +20,8 @@ public static class AnimationTestSceneBuilder
     const string ScenePath = "Assets/Scenes/AnimationTest.unity";
 
     // Seuils du blend tree = vitesses de déplacement du joueur (m/s)
-    const float WalkSpeed = 1.5f, JogSpeed = 3f, RunSpeed = 5f;
+    internal const float WalkSpeed = 1.5f, JogSpeed = 3f, RunSpeed = 5f;
+    const float MoveThreshold = 0.1f; // en dessous, le perso est considéré immobile
 
     static readonly string[] PlayerClips =
     {
@@ -59,27 +60,37 @@ public static class AnimationTestSceneBuilder
     {
         if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
 
-        // 1. Mixamo en Humanoid (Idle crée l'avatar, les deux autres le réutilisent)
-        ConfigureMixamo(MixamoDir + "/Idle.fbx", null, true);
-        Avatar mixamoAvatar = AssetDatabase.LoadAllAssetsAtPath(MixamoDir + "/Idle.fbx").OfType<Avatar>().FirstOrDefault();
-        if (mixamoAvatar == null || !mixamoAvatar.isValid || !mixamoAvatar.isHuman)
-        {
-            Debug.LogError("Avatar Humanoid Mixamo invalide. Ouvre Idle.fbx > Rig > Configure... pour corriger le mapping.");
-            return;
-        }
-        ConfigureMixamo(MixamoDir + "/Walking.fbx", mixamoAvatar, true);
-        ConfigureMixamo(MixamoDir + "/Waving.fbx", mixamoAvatar, false);
+        // 1. Mixamo en Humanoid
+        if (!PrepareMixamo()) return;
 
         // Vérifie que tous les clips se chargent avant de modifier quoi que ce soit
         foreach (string path in PlayerClips.Concat(RowFront.Select(r => r.clip)).Concat(RowBack.Select(r => r.clip)))
             LoadClip(path);
 
         // 2. Controllers
-        AnimatorController playerController = CreatePlayerController();
+        AnimatorController playerController = CreatePlayerController(PlayerControllerPath);
         AnimatorController showcaseController = CreateShowcaseController();
 
         // 3. Scène
         CreateScene(playerController, showcaseController);
+    }
+
+    // Mixamo en Humanoid (Idle crée l'avatar, les deux autres le réutilisent)
+    internal static bool PrepareMixamo()
+    {
+        ConfigureMixamo(MixamoDir + "/Idle.fbx", null, true);
+        Avatar mixamoAvatar = AssetDatabase.LoadAllAssetsAtPath(MixamoDir + "/Idle.fbx").OfType<Avatar>().FirstOrDefault();
+        if (mixamoAvatar == null || !mixamoAvatar.isValid || !mixamoAvatar.isHuman)
+        {
+            Debug.LogError("Avatar Humanoid Mixamo invalide. Ouvre Idle.fbx > Rig > Configure... pour corriger le mapping.");
+            return false;
+        }
+        ConfigureMixamo(MixamoDir + "/Walking.fbx", mixamoAvatar, true);
+        ConfigureMixamo(MixamoDir + "/Waving.fbx", mixamoAvatar, false);
+
+        foreach (string path in PlayerClips)
+            LoadClip(path);
+        return true;
     }
 
     static void ConfigureMixamo(string path, Avatar sourceAvatar, bool loop)
@@ -131,10 +142,11 @@ public static class AnimationTestSceneBuilder
         return AssetDatabase.LoadAllAssetsAtPath(path).OfType<AnimationClip>().FirstOrDefault(c => !c.name.StartsWith("__preview__"));
     }
 
-    static AnimatorController CreatePlayerController()
+    // Idle / marche / jogging / course selon "Speed", + salut immobile sur le trigger "Wave"
+    internal static AnimatorController CreatePlayerController(string path)
     {
-        AssetDatabase.DeleteAsset(PlayerControllerPath);
-        var controller = AnimatorController.CreateAnimatorControllerAtPath(PlayerControllerPath);
+        AssetDatabase.DeleteAsset(path);
+        var controller = AnimatorController.CreateAnimatorControllerAtPath(path);
         controller.AddParameter("Speed", AnimatorControllerParameterType.Float);
         controller.AddParameter("Wave", AnimatorControllerParameterType.Trigger);
 
@@ -154,6 +166,7 @@ public static class AnimationTestSceneBuilder
 
         AnimatorStateTransition toWave = sm.AddAnyStateTransition(waving);
         toWave.AddCondition(AnimatorConditionMode.If, 0f, "Wave");
+        toWave.AddCondition(AnimatorConditionMode.Less, MoveThreshold, "Speed"); // pas de salut en marchant
         toWave.hasExitTime = false;
         toWave.duration = 0.2f;
         toWave.canTransitionToSelf = false;
@@ -162,6 +175,12 @@ public static class AnimationTestSceneBuilder
         back.hasExitTime = true;
         back.exitTime = 0.9f;
         back.duration = 0.25f;
+
+        // Le salut est immobile : se déplacer l'annule immédiatement
+        AnimatorStateTransition cancel = waving.AddTransition(locomotion);
+        cancel.AddCondition(AnimatorConditionMode.Greater, MoveThreshold, "Speed");
+        cancel.hasExitTime = false;
+        cancel.duration = 0.15f;
 
         AssetDatabase.SaveAssets();
         return controller;
@@ -249,7 +268,7 @@ public static class AnimationTestSceneBuilder
         return animator;
     }
 
-    static Material GroundMaterial()
+    internal static Material GroundMaterial()
     {
         var mat = AssetDatabase.LoadAssetAtPath<Material>(GroundMatPath);
         if (mat != null) return mat;
@@ -258,7 +277,7 @@ public static class AnimationTestSceneBuilder
         return mat;
     }
 
-    static void EnsureFolder(string path)
+    internal static void EnsureFolder(string path)
     {
         if (AssetDatabase.IsValidFolder(path)) return;
         string parent = Path.GetDirectoryName(path).Replace('\\', '/');
