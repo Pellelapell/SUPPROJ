@@ -11,27 +11,58 @@ using UnityEditor.Build.Reporting;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
 
-// Menu Tools > Build : builds Windows et macOS dans le dossier Builds/ (ignoré par git).
+// Menu Tools > Build : builds Windows et macOS dans le dossier Builds/ (ignoré par git), en deux versions :
+// Admin (symbole ADMIN_BUILD, ouvre et héberge les rooms) et Élève (rejoint seulement les rooms ouvertes).
 // Le build macOS depuis Windows demande le module "Mac Build Support (Mono)" dans Unity Hub.
 public static class BuildTools
 {
     const string GameName = "SUPPROJ";
     const string BuildDir = "Builds";
+    const string AdminDefine = "ADMIN_BUILD";
 
-    [MenuItem("Tools/Build/Windows")]
-    public static void BuildWindows() => Build(BuildTarget.StandaloneWindows64, BuildDir + "/Windows/" + GameName + ".exe");
+    [MenuItem("Tools/Build/Élève - Windows", priority = 1)]
+    public static void BuildStudentWindows() => Build(BuildTarget.StandaloneWindows64, false);
 
-    [MenuItem("Tools/Build/macOS")]
-    public static void BuildMac() => Build(BuildTarget.StandaloneOSX, BuildDir + "/macOS/" + GameName + ".app");
+    [MenuItem("Tools/Build/Élève - macOS", priority = 2)]
+    public static void BuildStudentMac() => Build(BuildTarget.StandaloneOSX, false);
 
-    [MenuItem("Tools/Build/Windows + macOS")]
+    [MenuItem("Tools/Build/Admin - Windows", priority = 20)]
+    public static void BuildAdminWindows() => Build(BuildTarget.StandaloneWindows64, true);
+
+    [MenuItem("Tools/Build/Admin - macOS", priority = 21)]
+    public static void BuildAdminMac() => Build(BuildTarget.StandaloneOSX, true);
+
+    [MenuItem("Tools/Build/Tout (Admin + Élève, Windows + macOS)", priority = 40)]
     public static void BuildAll()
     {
-        if (Build(BuildTarget.StandaloneWindows64, BuildDir + "/Windows/" + GameName + ".exe"))
-            Build(BuildTarget.StandaloneOSX, BuildDir + "/macOS/" + GameName + ".app");
+        if (Build(BuildTarget.StandaloneWindows64, true) && Build(BuildTarget.StandaloneWindows64, false) &&
+            Build(BuildTarget.StandaloneOSX, true))
+            Build(BuildTarget.StandaloneOSX, false);
     }
 
-    static bool Build(BuildTarget target, string path)
+    // Dans l'éditeur on joue en admin ; cocher ce menu pour voir le menu tel que les élèves le voient
+    const string StudentToggle = "Tools/Build/Tester en élève dans l'éditeur";
+
+    [MenuItem(StudentToggle, priority = 60)]
+    static void ToggleStudent() => EditorPrefs.SetBool(AppRole.EditorStudentKey, !EditorPrefs.GetBool(AppRole.EditorStudentKey, false));
+
+    [MenuItem(StudentToggle, true)]
+    static bool ToggleStudentValidate()
+    {
+        Menu.SetChecked(StudentToggle, EditorPrefs.GetBool(AppRole.EditorStudentKey, false));
+        return true;
+    }
+
+    // Builds/Admin/Windows/SUPPROJ Admin.exe, Builds/Eleve/macOS/SUPPROJ.app, ...
+    static bool Build(BuildTarget target, bool admin)
+    {
+        bool mac = target == BuildTarget.StandaloneOSX;
+        string appName = admin ? GameName + " Admin" : GameName;
+        string path = $"{BuildDir}/{(admin ? "Admin" : "Eleve")}/{(mac ? "macOS" : "Windows")}/{appName}{(mac ? ".app" : ".exe")}";
+        return Build(target, path, admin, appName);
+    }
+
+    static bool Build(BuildTarget target, string path, bool admin, string appName)
     {
         if (!BuildPipeline.IsBuildTargetSupported(BuildTargetGroup.Standalone, target))
         {
@@ -61,6 +92,7 @@ public static class BuildTools
             locationPathName = path,
             target = target,
             targetGroup = BuildTargetGroup.Standalone,
+            extraScriptingDefines = admin ? new[] { AdminDefine } : null,
         });
 
         bool ok = report.summary.result == BuildResult.Succeeded;
@@ -70,7 +102,7 @@ public static class BuildTools
         {
             EditorUtility.DisplayDialog("Build macOS incomplet",
                 "Unity n'a pas créé le .app : le module Mac a sans doute été installé pendant qu'Unity était ouvert.\n\n" +
-                "Ferme Unity, rouvre le projet, puis relance Tools > Build > macOS.", "OK");
+                "Ferme Unity, rouvre le projet, puis relance le build macOS (Tools > Build).", "OK");
             return false;
         }
 
@@ -82,14 +114,14 @@ public static class BuildTools
             if (!SignMacApp(path)) return false;
 
             // Zip prêt à envoyer, avec les droits d'exécution macOS (un zip Windows classique les perd)
-            result = Path.Combine(BuildDir, GameName + "-Mac.zip");
+            result = Path.Combine(BuildDir, $"{GameName}-{(admin ? "Admin" : "Eleve")}-Mac.zip");
             MacZip.Create(path, result, new Dictionary<string, (string, bool)>
             {
-                { "LISEZ-MOI (Mac).txt", (MacReadme, false) },
+                { "LISEZ-MOI (Mac).txt", (MacReadme(appName), false) },
             });
         }
 
-        Debug.Log($"Build {target} : {report.summary.result} → {Path.GetFullPath(result)}");
+        Debug.Log($"Build {target} {(admin ? "Admin" : "Élève")} : {report.summary.result} → {Path.GetFullPath(result)}");
         if (ok) EditorUtility.RevealInFinder(result);
         return ok;
     }
@@ -165,18 +197,18 @@ public static class BuildTools
 
     // Jeu signé "ad-hoc" mais pas validé par Apple (il faudrait un compte développeur payant) :
     // macOS bloque la première ouverture, le joueur doit l'autoriser une fois.
-    const string MacReadme =
+    static string MacReadme(string appName) =>
         "Première ouverture sur Mac\n" +
         "==========================\n\n" +
         "macOS bloque les jeux qui ne viennent pas de l'App Store. A faire une seule fois :\n\n" +
-        "1. Double-clique sur " + GameName + ".app. macOS affiche \"" + GameName + " n'a pas été ouvert\" : clique sur OK / Terminé.\n" +
+        "1. Double-clique sur " + appName + ".app. macOS affiche \"" + appName + " n'a pas été ouvert\" : clique sur OK / Terminé.\n" +
         "2. Ouvre Réglages Système > Confidentialité et sécurité, descends tout en bas :\n" +
-        "   à côté de \"" + GameName + " a été bloqué\", clique sur \"Ouvrir quand même\", puis confirme avec ton mot de passe.\n" +
-        "   (Sur macOS 14 ou plus ancien, tu peux aussi faire clic droit sur " + GameName + ".app > Ouvrir > Ouvrir.)\n" +
+        "   à côté de \"" + appName + " a été bloqué\", clique sur \"Ouvrir quand même\", puis confirme avec ton mot de passe.\n" +
+        "   (Sur macOS 14 ou plus ancien, tu peux aussi faire clic droit sur " + appName + ".app > Ouvrir > Ouvrir.)\n" +
         "3. Le jeu se lance. Les fois suivantes, un double-clic suffit.\n\n" +
         "Si ça ne marche toujours pas (\"endommagé\", pas de bouton \"Ouvrir quand même\") :\n" +
         "1. Ouvre le Terminal (Cmd + Espace, tape Terminal, Entrée).\n" +
-        "2. Tape   xattr -cr   (avec un espace à la fin), puis glisse " + GameName + ".app dans la fenêtre du Terminal.\n" +
-        "3. Appuie sur Entrée, puis double-clique sur " + GameName + ".app.\n\n" +
-        "Conseil : sors " + GameName + ".app du dossier Téléchargements (mets-le par ex. dans Applications) avant de le lancer.\n";
+        "2. Tape   xattr -cr   (avec un espace à la fin), puis glisse " + appName + ".app dans la fenêtre du Terminal.\n" +
+        "3. Appuie sur Entrée, puis double-clique sur " + appName + ".app.\n\n" +
+        "Conseil : sors " + appName + ".app du dossier Téléchargements (mets-le par ex. dans Applications) avant de le lancer.\n";
 }

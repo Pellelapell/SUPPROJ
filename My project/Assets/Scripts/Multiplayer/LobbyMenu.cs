@@ -11,34 +11,36 @@ using Unity.Services.Lobbies.Models;
 using Unity.Services.Relay;
 using Unity.Services.Relay.Models;
 using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
 
-// Menu principal : liste des rooms (Unity Lobby), création d'une room, salle d'attente, lancement de la partie.
-// La salle d'attente n'utilise que Lobby. Au lancement, l'hôte crée un serveur relais (Unity Relay) et publie son
-// code dans la room : les autres joueurs le lisent et se connectent directement dans la scène de jeu.
+// Menu principal : pseudo, bouton JOUER, état des rooms et personnalisation du perso (aperçu 3D à droite).
+// Rooms : jusqu'à NetworkGameManager.MaxRooms rooms de MaxPlayers joueurs. Seul le build Admin (AppRole) en ouvre
+// une et l'héberge ; le build Élève rejoint la room ouverte la plus remplie, même si la partie est lancée.
+// L'hôte annonce sa room dans Unity Lobby avec son code Unity Relay, les autres lisent ce code et se connectent
+// directement dans la scène de jeu.
 public class LobbyMenu : MonoBehaviour
 {
-    const string JoinCodeKey = "joinCode";
-    const string NameKey = "name";
-
-    public int maxPlayers = 4;
-
-    [Header("Éditeur d'avatar")]
+    [Header("Personnalisation")]
     [Tooltip("Mêmes persos, dans le même ordre, que NetworkGameManager.playerPrefabs (sans réseau, pour l'aperçu)")]
     public GameObject[] avatarPreviewPrefabs;
+    [Tooltip("Noms affichés pour chaque perso")]
+    public string[] avatarNames;
+    [Tooltip("Animations de l'aperçu (idle + salut)")]
+    public RuntimeAnimatorController previewController;
     public Transform previewSpot;
 
-    enum MenuScreen { Connecting, Rooms, Avatar, InRoom, Error }
+    [Header("Cadrage de l'aperçu")]
+    [Tooltip("Position à l'écran (0-1) des pieds du perso : à droite, au-dessus du panneau de personnalisation")]
+    public Vector2 previewFeetOnScreen = new Vector2(0.835f, 0.37f);
+    public float previewDistance = 6.8f;
+    public float autoSpinSpeed = 25f;
 
-    MenuScreen screen = MenuScreen.Connecting;
-    string status = "Connexion aux services Unity...";
-    string playerName;
-    string roomName;
-    bool busy;
+    static readonly int WaveId = Animator.StringToHash("Wave");
 
+    bool servicesReady, busy;
     List<Lobby> rooms = new List<Lobby>();
-    Lobby currentLobby;
-    bool isHost;
-    float nextRoomsRefresh, nextLobbyPoll, nextHeartbeat;
+    float nextRoomsRefresh;
 
     NetworkManager Network => NetworkManager.Singleton;
     NetworkGameManager GameManager => Network.GetComponent<NetworkGameManager>();
@@ -46,15 +48,12 @@ public class LobbyMenu : MonoBehaviour
 
     async void Start()
     {
-        playerName = PlayerProfile.Name;
-        if (string.IsNullOrEmpty(playerName)) playerName = "Joueur" + UnityEngine.Random.Range(100, 1000);
-        PlayerProfile.Name = playerName;
-        roomName = "Room de " + playerName;
-        if (!string.IsNullOrEmpty(NetworkGameManager.MenuMessage))
-        {
-            status = NetworkGameManager.MenuMessage;
-            NetworkGameManager.MenuMessage = null;
-        }
+        if (string.IsNullOrEmpty(PlayerProfile.Name)) PlayerProfile.Name = "Joueur" + UnityEngine.Random.Range(100, 1000);
+
+        BuildUI();
+        RefreshPreview(false);
+        SetStatus(NetworkGameManager.MenuMessage ?? "Connexion aux services Unity…");
+        NetworkGameManager.MenuMessage = null;
 
         try
         {
@@ -67,141 +66,115 @@ public class LobbyMenu : MonoBehaviour
             if (!AuthenticationService.Instance.IsSignedIn)
                 await AuthenticationService.Instance.SignInAnonymouslyAsync();
 
-            screen = MenuScreen.Rooms;
-            if (status.StartsWith("Connexion")) status = "";
+            servicesReady = true;
+            if (statusText.text.StartsWith("Connexion")) SetStatus("");
             await RefreshRooms();
         }
         catch (Exception e)
         {
             Debug.LogException(e);
-            screen = MenuScreen.Error;
-            status = "Impossible de se connecter aux services Unity.\n" +
-                     "Vérifie ta connexion Internet et que le projet est lié à Unity Cloud " +
-                     "(Edit > Project Settings > Services) avec Lobby et Relay activés.\n\n" + e.Message;
+            SetStatus("Impossible de se connecter aux services Unity. Vérifie ta connexion Internet " +
+                      "(et que Lobby + Relay sont activés dans Unity Cloud).\n" + e.Message);
         }
     }
 
     void Update()
     {
-        if (busy) return;
-        float now = Time.unscaledTime;
-
-        if (screen == MenuScreen.Rooms && now >= nextRoomsRefresh)
+        if (servicesReady && !busy && Time.unscaledTime >= nextRoomsRefresh)
             _ = RefreshRooms();
 
-        if (screen == MenuScreen.InRoom && currentLobby != null)
-        {
-            // L'hôte doit "pinger" la room, sinon Unity Lobby la considère inactive au bout de 30 s
-            if (isHost && now >= nextHeartbeat)
-            {
-                nextHeartbeat = now + 15f;
-                _ = Safe(() => LobbyService.Instance.SendHeartbeatPingAsync(currentLobby.Id));
-            }
-            if (now >= nextLobbyPoll)
-                _ = PollLobby();
-        }
+        bool hasName = PlayerProfile.Name.Trim().Length > 0;
+        bool canPlay = AppRole.IsAdmin ? rooms.Count < NetworkGameManager.MaxRooms : BestRoom() != null;
+        playButton.interactable = servicesReady && !busy && hasName && canPlay;
+        foreach (Button b in roomButtons) b.interactable = servicesReady && !busy && hasName;
+        playLabel.text = busy ? "…" : AppRole.IsAdmin ? "OUVRIR UNE ROOM" : "JOUER";
+
+        UpdatePreview();
     }
 
-    // ---------- Liste des rooms ----------
+    // ---------- Rooms ----------
 
     async Task RefreshRooms()
     {
-        nextRoomsRefresh = Time.unscaledTime + 3f;
+        nextRoomsRefresh = Time.unscaledTime + 4f;
         try
         {
-            var options = new QueryLobbiesOptions
-            {
-                Count = 25,
-                Filters = new List<QueryFilter>
-                {
-                    new QueryFilter(QueryFilter.FieldOptions.AvailableSlots, "0", QueryFilter.OpOptions.GT),
-                },
-            };
-            QueryResponse response = await LobbyService.Instance.QueryLobbiesAsync(options);
-            rooms = response.Results.Where(l => !l.IsLocked).ToList();
+            QueryResponse response = await LobbyService.Instance.QueryLobbiesAsync(new QueryLobbiesOptions { Count = 10 });
+            rooms = response.Results
+                .Where(l => l.Data != null && l.Data.ContainsKey(NetworkGameManager.JoinCodeKey))
+                .OrderBy(l => l.Name)
+                .ToList();
         }
         catch (LobbyServiceException e)
         {
             Debug.LogWarning(e);
         }
+        RedrawRooms();
     }
 
-    async Task CreateRoom()
+    static int PlayerCount(Lobby room)
+    {
+        return room.Data.TryGetValue(NetworkGameManager.PlayersKey, out DataObject d) && int.TryParse(d.Value, out int n) ? n : 1;
+    }
+
+    static bool IsFull(Lobby room) => PlayerCount(room) >= NetworkGameManager.MaxPlayers;
+
+    // La room ouverte la plus remplie (les joueurs se regroupent), sinon null
+    Lobby BestRoom() => rooms.Where(r => !IsFull(r)).OrderByDescending(PlayerCount).FirstOrDefault();
+
+    void OnPlayClicked() => _ = AppRole.IsAdmin ? OpenRoom() : QuickPlay();
+
+    // Élève : rejoint la room ouverte la plus remplie
+    async Task QuickPlay()
     {
         busy = true;
-        status = "Création de la room...";
-        try
+        SetStatus("Recherche d'une room…");
+        await RefreshRooms();
+
+        Lobby room = BestRoom();
+        if (room != null)
+            await JoinRoom(room);
+        else
         {
-            var options = new CreateLobbyOptions { IsPrivate = false, Player = MakePlayer() };
-            currentLobby = await LobbyService.Instance.CreateLobbyAsync(roomName.Trim(), maxPlayers, options);
-            isHost = true;
-            screen = MenuScreen.InRoom;
-            status = "";
-            nextHeartbeat = Time.unscaledTime + 15f;
+            SetStatus(rooms.Count == 0
+                ? "Aucune room ouverte pour l'instant : attends que l'organisateur lance la session."
+                : "Toutes les rooms sont pleines, réessaie dans un instant.");
+            busy = false;
         }
-        catch (Exception e)
-        {
-            Debug.LogException(e);
-            status = "Erreur pendant la création : " + e.Message;
-        }
-        busy = false;
     }
 
-    async Task JoinRoom(Lobby lobby)
+    // Admin : ouvre une nouvelle room (dans la limite de MaxRooms) et l'héberge sur ce PC
+    async Task OpenRoom()
     {
         busy = true;
-        status = "Connexion à " + lobby.Name + "...";
-        try
+        SetStatus("Vérification des rooms…");
+        await RefreshRooms();
+
+        if (rooms.Count < NetworkGameManager.MaxRooms)
+            await HostRoom(FreeRoomName());
+        else
         {
-            currentLobby = await LobbyService.Instance.JoinLobbyByIdAsync(lobby.Id, new JoinLobbyByIdOptions { Player = MakePlayer() });
-            isHost = false;
-            screen = MenuScreen.InRoom;
-            status = "";
+            SetStatus($"Il y a déjà {NetworkGameManager.MaxRooms} rooms ouvertes.");
+            busy = false;
         }
-        catch (Exception e)
-        {
-            Debug.LogException(e);
-            status = "Impossible de rejoindre : " + e.Message;
-            await RefreshRooms();
-        }
-        busy = false;
     }
 
-    // ---------- Salle d'attente ----------
-
-    async Task PollLobby()
+    string FreeRoomName()
     {
-        nextLobbyPoll = Time.unscaledTime + 2f;
-        try
-        {
-            currentLobby = await LobbyService.Instance.GetLobbyAsync(currentLobby.Id);
-        }
-        catch (LobbyServiceException e)
-        {
-            Debug.LogWarning(e);
-            if (!isHost)
-            {
-                // Room supprimée par l'hôte (ou on a été retiré)
-                currentLobby = null;
-                screen = MenuScreen.Rooms;
-                status = "La room a été fermée.";
-            }
-            return;
-        }
-
-        // L'hôte a lancé la partie : son code Relay est publié dans la room
-        if (!isHost && currentLobby.Data != null && currentLobby.Data.TryGetValue(JoinCodeKey, out DataObject code))
-            await JoinGame(code.Value);
+        for (int i = 1; i <= NetworkGameManager.MaxRooms; i++)
+            if (rooms.All(r => r.Name != "Room " + i)) return "Room " + i;
+        return "Room " + (rooms.Count + 1);
     }
 
-    async Task StartGame()
+    // Personne dans la room : on la crée et on l'héberge
+    async Task HostRoom(string roomName)
     {
         busy = true;
-        status = "Lancement de la partie...";
+        SetStatus("Ouverture de " + roomName + "…");
         try
         {
             // 1. Serveur relais pour les autres joueurs
-            Allocation allocation = await RelayService.Instance.CreateAllocationAsync(maxPlayers - 1);
+            Allocation allocation = await RelayService.Instance.CreateAllocationAsync(NetworkGameManager.MaxPlayers - 1);
             string joinCode = await RelayService.Instance.GetJoinCodeAsync(allocation.AllocationId);
             RelayServerEndpoint endpoint = GetEndpoint(allocation.ServerEndpoints);
             Transport.SetRelayServerData(endpoint.Host, (ushort)endpoint.Port,
@@ -211,93 +184,55 @@ public class LobbyMenu : MonoBehaviour
             GameManager.PrepareConnection();
             if (!Network.StartHost()) throw new Exception("Le démarrage de l'hôte a échoué.");
 
-            // 3. Code publié dans la room (fermée aux nouveaux) : les autres se connectent
-            var update = new UpdateLobbyOptions
+            // 3. Room annoncée dans Lobby avec le code Relay : visible depuis le menu de tous les joueurs
+            var options = new CreateLobbyOptions
             {
-                IsLocked = true,
+                IsPrivate = false,
                 Data = new Dictionary<string, DataObject>
                 {
-                    { JoinCodeKey, new DataObject(DataObject.VisibilityOptions.Member, joinCode) },
+                    { NetworkGameManager.JoinCodeKey, new DataObject(DataObject.VisibilityOptions.Public, joinCode) },
+                    { NetworkGameManager.PlayersKey, new DataObject(DataObject.VisibilityOptions.Public, "1") },
                 },
             };
-            await LobbyService.Instance.UpdateLobbyAsync(currentLobby.Id, update);
-            GameManager.DeleteLobbyLater(currentLobby.Id);
-            currentLobby = null;
+            Lobby lobby = await LobbyService.Instance.CreateLobbyAsync(roomName, NetworkGameManager.MaxPlayers, options);
 
-            // 4. Tout le monde passe dans la scène de jeu
-            GameManager.StartGame();
+            // 4. Direction la scène de jeu
+            GameManager.StartGame(lobby.Id, roomName);
         }
         catch (Exception e)
         {
             Debug.LogException(e);
-            status = "Erreur au lancement : " + e.Message;
+            SetStatus("Impossible d'ouvrir la room : " + e.Message);
             if (Network.IsListening) Network.Shutdown();
             busy = false;
         }
     }
 
-    async Task JoinGame(string joinCode)
+    async Task JoinRoom(Lobby room)
     {
         busy = true;
-        status = "Connexion à la partie...";
+        SetStatus("Connexion à " + room.Name + "…");
         try
         {
+            string joinCode = room.Data[NetworkGameManager.JoinCodeKey].Value;
             JoinAllocation allocation = await RelayService.Instance.JoinAllocationAsync(joinCode);
             RelayServerEndpoint endpoint = GetEndpoint(allocation.ServerEndpoints);
             Transport.SetRelayServerData(endpoint.Host, (ushort)endpoint.Port,
                 allocation.AllocationIdBytes, allocation.Key, allocation.ConnectionData, allocation.HostConnectionData, endpoint.Secure);
 
-            // La room n'est plus utile pour ce joueur (l'hôte la supprimera)
-            await LeaveLobbyOnly();
-
-            // Netcode charge la scène de jeu de l'hôte automatiquement après la connexion
+            // Netcode charge la scène de jeu de l'hôte automatiquement après la connexion.
+            // Si la room est pleine, l'hôte refuse et NetworkGameManager ramène au menu avec le message.
+            NetworkGameManager.RoomName = room.Name;
             GameManager.PrepareConnection();
             if (!Network.StartClient()) throw new Exception("La connexion au jeu a échoué.");
         }
         catch (Exception e)
         {
             Debug.LogException(e);
-            screen = MenuScreen.Rooms;
-            status = "Impossible de rejoindre la partie : " + e.Message;
+            SetStatus("Impossible de rejoindre " + room.Name + " (l'hôte vient peut-être de partir).");
             busy = false;
+            await RefreshRooms();
         }
-    }
-
-    async Task LeaveRoom()
-    {
-        busy = true;
-        await LeaveLobbyOnly();
-        screen = MenuScreen.Rooms;
-        status = "";
-        busy = false;
-        await RefreshRooms();
-    }
-
-    async Task LeaveLobbyOnly()
-    {
-        if (currentLobby == null) return;
-        string id = currentLobby.Id;
-        currentLobby = null;
-        if (isHost)
-            await Safe(() => LobbyService.Instance.DeleteLobbyAsync(id));
-        else
-            await Safe(() => LobbyService.Instance.RemovePlayerAsync(id, AuthenticationService.Instance.PlayerId));
-    }
-
-    async void OnApplicationQuit()
-    {
-        // Évite de laisser une room fantôme dans la liste
-        await LeaveLobbyOnly();
-    }
-
-    // ---------- Utilitaires ----------
-
-    Player MakePlayer()
-    {
-        return new Player(data: new Dictionary<string, PlayerDataObject>
-        {
-            { NameKey, new PlayerDataObject(PlayerDataObject.VisibilityOptions.Member, playerName.Trim()) },
-        });
     }
 
     static RelayServerEndpoint GetEndpoint(List<RelayServerEndpoint> endpoints)
@@ -305,213 +240,306 @@ public class LobbyMenu : MonoBehaviour
         return endpoints.FirstOrDefault(e => e.ConnectionType == "dtls") ?? endpoints.First();
     }
 
-    static async Task Safe(Func<Task> call)
-    {
-        try { await call(); }
-        catch (Exception e) { Debug.LogWarning(e); }
-    }
-
-    // ---------- Interface ----------
-
-    GUIStyle title, label, button;
-
-    void OnGUI()
-    {
-        if (title == null)
-        {
-            title = new GUIStyle(GUI.skin.label) { fontSize = 32, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
-            label = new GUIStyle(GUI.skin.label) { fontSize = 16, wordWrap = true };
-            button = new GUIStyle(GUI.skin.button) { fontSize = 16 };
-        }
-
-        float width = Mathf.Min(520f, Screen.width - 32f);
-        float x = screen == MenuScreen.Avatar ? 40f : (Screen.width - width) * 0.5f;
-        if (screen == MenuScreen.Avatar) width = Mathf.Min(420f, Screen.width * 0.45f);
-        var area = new Rect(x, 40f, width, Screen.height - 80f);
-        GUILayout.BeginArea(area, GUI.skin.box);
-        GUILayout.Label("SUPPROJ — Multijoueur", title, GUILayout.Height(60f));
-
-        GUI.enabled = !busy;
-        switch (screen)
-        {
-            case MenuScreen.Connecting: GUILayout.Label(status, label); break;
-            case MenuScreen.Error: GUILayout.Label(status, label); break;
-            case MenuScreen.Rooms: DrawRooms(); break;
-            case MenuScreen.Avatar: DrawAvatarEditor(); break;
-            case MenuScreen.InRoom: DrawRoom(); break;
-        }
-        GUI.enabled = true;
-
-        if (screen != MenuScreen.Connecting && screen != MenuScreen.Error && !string.IsNullOrEmpty(status))
-        {
-            GUILayout.FlexibleSpace();
-            GUILayout.Label(status, label);
-        }
-        GUILayout.EndArea();
-    }
-
-    void DrawRooms()
-    {
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("Pseudo :", label, GUILayout.Width(110f));
-        string newName = GUILayout.TextField(playerName, 16, GUILayout.Height(26f));
-        if (newName != playerName)
-        {
-            playerName = newName;
-            PlayerProfile.Name = playerName.Trim();
-        }
-        GUILayout.EndHorizontal();
-
-        if (GUILayout.Button("Mon avatar", button, GUILayout.Height(32f)))
-            OpenAvatarEditor();
-        GUILayout.Space(8f);
-
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("Nom de room :", label, GUILayout.Width(110f));
-        roomName = GUILayout.TextField(roomName, 30, GUILayout.Height(26f));
-        GUILayout.EndHorizontal();
-
-        bool hasName = playerName.Trim().Length > 0;
-        GUI.enabled = !busy && hasName && roomName.Trim().Length > 0;
-        if (GUILayout.Button("Créer une room", button, GUILayout.Height(40f)))
-        {
-            _ = CreateRoom();
-        }
-        GUI.enabled = !busy;
-
-        GUILayout.Space(16f);
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("Rooms disponibles", label);
-        if (GUILayout.Button("Rafraîchir", button, GUILayout.Width(110f))) _ = RefreshRooms();
-        GUILayout.EndHorizontal();
-
-        if (rooms.Count == 0)
-            GUILayout.Label("Aucune room pour l'instant. Crée la tienne !", label);
-
-        foreach (Lobby lobby in rooms)
-        {
-            GUILayout.BeginHorizontal(GUI.skin.box);
-            GUILayout.Label($"{lobby.Name}   ({lobby.Players.Count}/{lobby.MaxPlayers})", label);
-            GUI.enabled = !busy && hasName;
-            if (GUILayout.Button("Rejoindre", button, GUILayout.Width(110f), GUILayout.Height(30f)))
-            {
-                _ = JoinRoom(lobby);
-            }
-            GUI.enabled = !busy;
-            GUILayout.EndHorizontal();
-        }
-    }
-
-    // ---------- Éditeur d'avatar ----------
+    // ---------- Aperçu du perso ----------
 
     GameObject preview;
+    Animator previewAnimator;
+    float lastDrag = -10f;
 
-    void OpenAvatarEditor()
-    {
-        screen = MenuScreen.Avatar;
-        status = "";
-        RefreshPreview();
-    }
-
-    void CloseAvatarEditor()
-    {
-        if (preview != null) Destroy(preview);
-        screen = MenuScreen.Rooms;
-    }
-
-    void RefreshPreview()
+    void RefreshPreview(bool wave)
     {
         if (preview != null) Destroy(preview);
         if (avatarPreviewPrefabs == null || avatarPreviewPrefabs.Length == 0 || previewSpot == null) return;
 
-        int model = Mathf.Clamp(PlayerProfile.Model, 0, avatarPreviewPrefabs.Length - 1);
-        preview = Instantiate(avatarPreviewPrefabs[model], previewSpot.position, previewSpot.rotation, previewSpot);
-        if (NetworkGameManager.Instance != null)
-            PlayerProfile.ApplyPalette(preview, NetworkGameManager.Instance.GetPalette(PlayerProfile.Palette));
-    }
+        preview = Instantiate(avatarPreviewPrefabs[ModelIndex], previewSpot.position, previewSpot.rotation, previewSpot);
+        // Le script de démo City People change les tenues tout seul : on le retire
+        foreach (var c in preview.GetComponentsInChildren<CityPeople.CityPeople>())
+            DestroyImmediate(c);
 
-    void LateUpdate()
-    {
-        // L'aperçu tourne doucement sur lui-même
-        if (screen == MenuScreen.Avatar && previewSpot != null)
-            previewSpot.Rotate(0f, 30f * Time.deltaTime, 0f);
-    }
-
-    void DrawAvatarEditor()
-    {
-        int modelCount = avatarPreviewPrefabs != null ? avatarPreviewPrefabs.Length : 0;
-        int paletteCount = NetworkGameManager.Instance != null && NetworkGameManager.Instance.palettes != null
-            ? NetworkGameManager.Instance.palettes.Length : 0;
-
-        GUILayout.Label("Crée ton avatar", label);
-        GUILayout.Space(8f);
-
-        if (modelCount > 0)
+        previewAnimator = preview.GetComponentInChildren<Animator>();
+        if (previewAnimator != null && previewController != null)
         {
-            int model = Mathf.Clamp(PlayerProfile.Model, 0, modelCount - 1);
-            int newModel = Selector("Perso", model, modelCount, avatarPreviewPrefabs[model].name);
-            if (newModel != model)
-            {
-                PlayerProfile.Model = newModel;
-                RefreshPreview();
-            }
+            previewAnimator.runtimeAnimatorController = previewController;
+            previewAnimator.applyRootMotion = false;
+            if (wave) previewAnimator.SetTrigger(WaveId);
         }
-
-        if (paletteCount > 0)
-        {
-            int palette = Mathf.Clamp(PlayerProfile.Palette, 0, paletteCount - 1);
-            int newPalette = Selector("Couleurs", palette, paletteCount, $"Palette {palette + 1}");
-            if (newPalette != palette)
-            {
-                PlayerProfile.Palette = newPalette;
-                RefreshPreview();
-            }
-        }
-
-        GUILayout.Space(16f);
-        if (GUILayout.Button("Valider", button, GUILayout.Height(40f)))
-            CloseAvatarEditor();
+        ApplyPalette();
+        modelText.text = ModelName(ModelIndex);
     }
 
-    // Ligne  "Libellé   <   valeur   >"  qui fait défiler un index en boucle
-    int Selector(string title, int index, int count, string value)
+    void ApplyPalette()
     {
-        GUILayout.BeginHorizontal();
-        GUILayout.Label(title, label, GUILayout.Width(90f));
-        if (GUILayout.Button("<", button, GUILayout.Width(40f), GUILayout.Height(30f))) index = (index - 1 + count) % count;
-        GUILayout.Label($"{value}  ({index + 1}/{count})", label, GUILayout.MinWidth(150f));
-        if (GUILayout.Button(">", button, GUILayout.Width(40f), GUILayout.Height(30f))) index = (index + 1) % count;
-        GUILayout.EndHorizontal();
-        return index;
+        if (preview != null && NetworkGameManager.Instance != null)
+            PlayerProfile.ApplyPalette(preview, NetworkGameManager.Instance.GetPalette(PaletteIndex));
+        paletteText.text = PaletteCount > 0 ? $"Tenue {PaletteIndex + 1} / {PaletteCount}" : "—";
     }
 
-    void DrawRoom()
+    int ModelCount => avatarPreviewPrefabs != null ? avatarPreviewPrefabs.Length : 0;
+    int PaletteCount => NetworkGameManager.Instance != null && NetworkGameManager.Instance.palettes != null
+        ? NetworkGameManager.Instance.palettes.Length : 0;
+    int ModelIndex => Mathf.Clamp(PlayerProfile.Model, 0, Mathf.Max(0, ModelCount - 1));
+    int PaletteIndex => Mathf.Clamp(PlayerProfile.Palette, 0, Mathf.Max(0, PaletteCount - 1));
+
+    string ModelName(int i)
     {
-        if (currentLobby == null)
+        if (avatarNames != null && i < avatarNames.Length && !string.IsNullOrEmpty(avatarNames[i])) return avatarNames[i];
+        return ModelCount > 0 ? avatarPreviewPrefabs[i].name.Replace('_', ' ') : "—";
+    }
+
+    void ChangeModel(int step)
+    {
+        if (ModelCount == 0) return;
+        PlayerProfile.Model = (ModelIndex + step + ModelCount) % ModelCount;
+        RefreshPreview(true);
+    }
+
+    void ChangePalette(int step)
+    {
+        if (PaletteCount == 0) return;
+        PlayerProfile.Palette = (PaletteIndex + step + PaletteCount) % PaletteCount;
+        ApplyPalette();
+    }
+
+    void UpdatePreview()
+    {
+        if (previewSpot == null) return;
+
+        // Tourne tout seul, sauf juste après que le joueur l'a fait tourner à la souris
+        if (Time.unscaledTime - lastDrag > 1.5f)
+            previewSpot.Rotate(0f, autoSpinSpeed * Time.deltaTime, 0f);
+
+        // Caméra placée pour que le perso tombe à droite, au-dessus du panneau, quel que soit le format d'écran
+        Camera cam = Camera.main;
+        if (cam == null) return;
+        float halfHeight = previewDistance * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
+        Vector3 spot = previewSpot.position;
+        cam.transform.SetPositionAndRotation(new Vector3(
+            spot.x - (previewFeetOnScreen.x - 0.5f) * 2f * halfHeight * cam.aspect,
+            spot.y - (previewFeetOnScreen.y - 0.5f) * 2f * halfHeight,
+            spot.z - previewDistance), Quaternion.identity);
+    }
+
+    // ---------- Interface ----------
+
+    Text statusText, playLabel, playInfo, modelText, paletteText;
+    Button playButton;
+    RectTransform roomList;
+    readonly List<Button> roomButtons = new List<Button>();
+
+    void SetStatus(string message)
+    {
+        statusText.text = message;
+        statusText.gameObject.SetActive(!string.IsNullOrEmpty(message));
+    }
+
+    void BuildUI()
+    {
+        if (FindObjectOfType<EventSystem>() == null)
+            new GameObject("EventSystem", typeof(EventSystem), typeof(StandaloneInputModule));
+
+        BuildBackground();
+
+        var canvasGo = new GameObject("MenuCanvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
+        canvasGo.GetComponent<Canvas>().renderMode = RenderMode.ScreenSpaceOverlay;
+        var scaler = canvasGo.GetComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1920, 1080);
+        scaler.matchWidthOrHeight = 0.5f;
+        Transform root = canvasGo.transform;
+
+        // Zone invisible au-dessus du panneau de droite : glisser fait tourner le perso
+        Image drag = MenuStyle.Box("DragArea", root, Color.clear);
+        drag.rectTransform.anchorMin = new Vector2(0.66f, 0.36f);
+        drag.rectTransform.anchorMax = new Vector2(1f, 1f);
+        drag.rectTransform.offsetMin = drag.rectTransform.offsetMax = Vector2.zero;
+        drag.gameObject.AddComponent<DragArea>().onDrag = dx =>
         {
-            GUILayout.Label(status, label);
+            previewSpot.Rotate(0f, -dx * 0.5f, 0f);
+            lastDrag = Time.unscaledTime;
+        };
+
+        BuildLeftColumn(root);
+        BuildCustomization(root);
+    }
+
+    // Dégradé + halo derrière le perso, dans un canvas rendu par la caméra derrière la scène 3D
+    void BuildBackground()
+    {
+        var go = new GameObject("MenuBackground", typeof(Canvas), typeof(CanvasScaler));
+        var canvas = go.GetComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceCamera;
+        canvas.worldCamera = Camera.main;
+        canvas.planeDistance = 40f;
+        var scaler = go.GetComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1920, 1080);
+        scaler.matchWidthOrHeight = 0.5f;
+
+        var gradient = MenuStyle.Rect("Gradient", go.transform).gameObject.AddComponent<RawImage>();
+        gradient.texture = MenuStyle.Gradient(MenuStyle.BackgroundTop, MenuStyle.BackgroundBottom);
+        gradient.raycastTarget = false;
+        MenuStyle.Stretch(gradient.rectTransform);
+
+        Glow(go.transform, previewFeetOnScreen + new Vector2(0f, 0.25f), 1100f, new Color(MenuStyle.Accent.r, MenuStyle.Accent.g, MenuStyle.Accent.b, 0.4f));
+        Glow(go.transform, new Vector2(0.12f, 0.85f), 900f, new Color(MenuStyle.Secondary.r, MenuStyle.Secondary.g, MenuStyle.Secondary.b, 0.08f));
+    }
+
+    static void Glow(Transform parent, Vector2 anchor, float size, Color color)
+    {
+        var img = MenuStyle.Rect("Glow", parent).gameObject.AddComponent<RawImage>();
+        img.texture = MenuStyle.RadialGlow;
+        img.color = color;
+        img.raycastTarget = false;
+        img.rectTransform.anchorMin = img.rectTransform.anchorMax = anchor;
+        img.rectTransform.sizeDelta = new Vector2(size, size);
+    }
+
+    void BuildLeftColumn(Transform root)
+    {
+        RectTransform col = MenuStyle.Rect("LeftColumn", root);
+        col.anchorMin = new Vector2(0f, 0f);
+        col.anchorMax = new Vector2(0f, 1f);
+        col.pivot = new Vector2(0f, 0.5f);
+        col.anchoredPosition = new Vector2(110f, 0f);
+        col.sizeDelta = new Vector2(620f, -160f);
+        var layout = MenuStyle.Column(col, 14f);
+        layout.childForceExpandWidth = false;
+        layout.childAlignment = TextAnchor.MiddleLeft;
+
+        MenuStyle.Label("Title", col, "SUPINFO", 124, MenuStyle.Text, TextAnchor.MiddleLeft, FontStyle.Bold);
+        MenuStyle.Size(MenuStyle.Box("TitleBar", col, MenuStyle.Accent, MenuStyle.RoundedSmall), 8f, 140f);
+        MenuStyle.Label("Subtitle", col, "WEBINAR  ·  Découvre SUPINFO en jouant !", 28, MenuStyle.Text);
+        if (AppRole.IsAdmin)
+            MenuStyle.Label("AdminBadge", col, "MODE ADMIN", 18, MenuStyle.Secondary, TextAnchor.MiddleLeft, FontStyle.Bold);
+        Spacer(col, 46f);
+
+        MenuStyle.Label("NameLabel", col, "PSEUDO", 18, MenuStyle.TextDim, TextAnchor.MiddleLeft, FontStyle.Bold);
+        InputField nameField = MenuStyle.Input("NameField", col, PlayerProfile.Name, 30, 16);
+        MenuStyle.Size(nameField, 68f, -1, 1f);
+        nameField.onValueChanged.AddListener(v => PlayerProfile.Name = v.Trim());
+        Spacer(col, 18f);
+
+        playButton = MenuStyle.Button("PlayButton", col, "JOUER", 46, MenuStyle.Accent, MenuStyle.AccentHover, Color.white, OnPlayClicked);
+        playLabel = playButton.GetComponentInChildren<Text>();
+        MenuStyle.Size(playButton, 104f, -1, 1f);
+        playInfo = MenuStyle.Label("PlayInfo", col, "", 20, MenuStyle.TextDim);
+        Spacer(col, 30f);
+
+        MenuStyle.Label("RoomsLabel", col, "ROOMS", 18, MenuStyle.TextDim, TextAnchor.MiddleLeft, FontStyle.Bold);
+        roomList = MenuStyle.Rect("RoomList", col);
+        MenuStyle.Column(roomList, 12f);
+        MenuStyle.Size(roomList, -1, -1, 1f);
+
+        statusText = MenuStyle.Label("Status", col, "", 20, MenuStyle.Secondary);
+        MenuStyle.Size(statusText, -1, -1, 1f);
+
+        Button quit = MenuStyle.Button("QuitButton", root, "QUITTER", 20, new Color(1f, 1f, 1f, 0.06f), new Color(1f, 1f, 1f, 0.14f),
+            MenuStyle.TextDim, Application.Quit);
+        var rt = (RectTransform)quit.transform;
+        rt.anchorMin = rt.anchorMax = rt.pivot = Vector2.zero;
+        rt.anchoredPosition = new Vector2(110f, 60f);
+        rt.sizeDelta = new Vector2(180f, 52f);
+    }
+
+    static void Spacer(Transform parent, float height) => MenuStyle.Size(MenuStyle.Rect("Space", parent), height);
+
+    void RedrawRooms()
+    {
+        foreach (Transform child in roomList) Destroy(child.gameObject);
+        roomButtons.Clear();
+
+        Lobby best = BestRoom();
+        if (AppRole.IsAdmin)
+            playInfo.text = rooms.Count < NetworkGameManager.MaxRooms
+                ? $"Ouvre {FreeRoomName()}, hébergée sur ce PC : garde le jeu ouvert pendant la session"
+                : $"Maximum de {NetworkGameManager.MaxRooms} rooms atteint";
+        else if (best != null)
+            playInfo.text = $"Tu vas rejoindre {best.Name}  ·  {PlayerCount(best)}/{NetworkGameManager.MaxPlayers} joueurs";
+        else if (rooms.Count == 0)
+            playInfo.text = "En attente de l'ouverture d'une room par l'organisateur…";
+        else
+            playInfo.text = "Toutes les rooms sont pleines";
+
+        if (rooms.Count == 0)
+        {
+            Image empty = MenuStyle.Box("Empty", roomList, MenuStyle.Panel);
+            MenuStyle.Size(empty, 74f);
+            Text t = MenuStyle.Label("Text", empty.transform, "Aucune room ouverte pour l'instant", 22, MenuStyle.TextDim, TextAnchor.MiddleCenter);
+            MenuStyle.Stretch(t.rectTransform);
             return;
         }
 
-        GUILayout.Label($"Room : {currentLobby.Name}", label);
-        GUILayout.Label($"Joueurs ({currentLobby.Players.Count}/{currentLobby.MaxPlayers}) :", label);
-        foreach (Player p in currentLobby.Players)
-        {
-            string name = p.Data != null && p.Data.TryGetValue(NameKey, out PlayerDataObject d) ? d.Value : "?";
-            if (p.Id == currentLobby.HostId) name += "  (hôte)";
-            GUILayout.Label("  • " + name, label);
-        }
+        foreach (Lobby room in rooms)
+            RoomCard(room);
+    }
 
-        GUILayout.Space(16f);
-        if (isHost)
-        {
-            if (GUILayout.Button("Lancer la partie", button, GUILayout.Height(40f))) _ = StartGame();
-        }
-        else
-        {
-            GUILayout.Label("En attente du lancement par l'hôte...", label);
-        }
+    void RoomCard(Lobby room)
+    {
+        int count = PlayerCount(room);
+        bool full = count >= NetworkGameManager.MaxPlayers;
 
-        if (GUILayout.Button("Quitter la room", button, GUILayout.Height(32f))) _ = LeaveRoom();
+        Image card = MenuStyle.Box(room.Name, roomList, MenuStyle.Panel);
+        MenuStyle.Size(card, 86f);
+        MenuStyle.Row(card, 18f, new RectOffset(24, 14, 14, 18)).childForceExpandHeight = false;
+
+        Image dot = MenuStyle.Box("Dot", card.transform, full ? MenuStyle.Accent : MenuStyle.Secondary, MenuStyle.RoundedSmall);
+        MenuStyle.Size(dot, 14f, 14f);
+
+        Text name = MenuStyle.Label("Name", card.transform, room.Name, 28, MenuStyle.Text, TextAnchor.MiddleLeft, FontStyle.Bold);
+        MenuStyle.Size(name, -1, -1, 1f);
+        MenuStyle.Label("Count", card.transform, $"{count}/{NetworkGameManager.MaxPlayers}", 24, MenuStyle.TextDim, TextAnchor.MiddleRight);
+
+        Button join = MenuStyle.Button("Join", card.transform, full ? "PLEINE" : "REJOINDRE", 18,
+            new Color(1f, 1f, 1f, 0.1f), new Color(1f, 1f, 1f, 0.2f), MenuStyle.Text, () => _ = JoinRoom(room));
+        MenuStyle.Size(join, 52f, 150f);
+        if (!full) roomButtons.Add(join);
+        else join.interactable = false;
+
+        // Jauge de remplissage en bas de la carte
+        Image bar = MenuStyle.Box("Fill", card.transform, full ? MenuStyle.Accent : MenuStyle.Secondary, MenuStyle.RoundedSmall);
+        bar.gameObject.AddComponent<LayoutElement>().ignoreLayout = true;
+        bar.rectTransform.anchorMin = new Vector2(0f, 0f);
+        bar.rectTransform.anchorMax = new Vector2((float)count / NetworkGameManager.MaxPlayers, 0f);
+        bar.rectTransform.pivot = new Vector2(0f, 0f);
+        bar.rectTransform.offsetMin = new Vector2(10f, 6f);
+        bar.rectTransform.offsetMax = new Vector2(-4f, 10f);
+    }
+
+    // Panneau en bas à droite, sous l'aperçu du perso
+    void BuildCustomization(Transform root)
+    {
+        Image panel = MenuStyle.Box("Customization", root, MenuStyle.Panel);
+        var rt = panel.rectTransform;
+        rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(1f, 0f);
+        rt.anchoredPosition = new Vector2(-90f, 60f);
+        rt.sizeDelta = new Vector2(500f, 300f);
+        MenuStyle.Column(panel, 12f, new RectOffset(28, 28, 22, 26));
+
+        Text header = MenuStyle.Label("Header", panel.transform, "TON PERSONNAGE", 20, MenuStyle.Text, TextAnchor.MiddleLeft, FontStyle.Bold);
+        MenuStyle.Size(header, 30f);
+        Text hint = MenuStyle.Label("Hint", panel.transform, "Glisse sur le perso pour le faire tourner", 16, MenuStyle.TextDim);
+        MenuStyle.Size(hint, 22f);
+
+        modelText = Selector(panel.transform, "MODÈLE", ChangeModel);
+        paletteText = Selector(panel.transform, "TENUE", ChangePalette);
+    }
+
+    // Ligne  "LIBELLÉ   <   valeur   >"
+    Text Selector(Transform parent, string title, Action<int> change)
+    {
+        Text label = MenuStyle.Label(title, parent, title, 15, MenuStyle.TextDim, TextAnchor.LowerLeft, FontStyle.Bold);
+        MenuStyle.Size(label, 22f);
+
+        Image row = MenuStyle.Box(title + "Row", parent, new Color(1f, 1f, 1f, 0.05f));
+        MenuStyle.Size(row, 62f);
+        var layout = MenuStyle.Row(row, 8f, new RectOffset(6, 6, 6, 6));
+
+        Button prev = MenuStyle.Button("Prev", row.transform, "<", 28, MenuStyle.Accent, MenuStyle.AccentHover, Color.white, () => change(-1));
+        MenuStyle.Size(prev, -1, 54f);
+        Text value = MenuStyle.Label("Value", row.transform, "", 26, MenuStyle.Text, TextAnchor.MiddleCenter, FontStyle.Bold);
+        MenuStyle.Size(value, -1, -1, 1f);
+        Button next = MenuStyle.Button("Next", row.transform, ">", 28, MenuStyle.Accent, MenuStyle.AccentHover, Color.white, () => change(1));
+        MenuStyle.Size(next, -1, 54f);
+        return value;
     }
 }
