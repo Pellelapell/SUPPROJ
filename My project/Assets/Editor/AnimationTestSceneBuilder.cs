@@ -182,6 +182,11 @@ public static class AnimationTestSceneBuilder
         cancel.hasExitTime = false;
         cancel.duration = 0.15f;
 
+        // IK pour la pose assise (SeatedPose)
+        AnimatorControllerLayer[] layers = controller.layers;
+        layers[0].iKPass = true;
+        controller.layers = layers;
+
         AssetDatabase.SaveAssets();
         return controller;
     }

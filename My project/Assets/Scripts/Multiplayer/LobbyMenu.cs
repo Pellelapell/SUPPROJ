@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Unity.Netcode;
 using Unity.Netcode.Transports.UTP;
+using Unity.Networking.Transport.Relay;
 using Unity.Services.Authentication;
 using Unity.Services.Core;
 using Unity.Services.Lobbies;
@@ -11,7 +12,6 @@ using Unity.Services.Lobbies.Models;
 using Unity.Services.Relay;
 using Unity.Services.Relay.Models;
 using UnityEngine;
-using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
 // Menu principal : pseudo, bouton JOUER, état des rooms et personnalisation du perso (aperçu 3D à droite).
@@ -176,9 +176,7 @@ public class LobbyMenu : MonoBehaviour
             // 1. Serveur relais pour les autres joueurs
             Allocation allocation = await RelayService.Instance.CreateAllocationAsync(NetworkGameManager.MaxPlayers - 1);
             string joinCode = await RelayService.Instance.GetJoinCodeAsync(allocation.AllocationId);
-            RelayServerEndpoint endpoint = GetEndpoint(allocation.ServerEndpoints);
-            Transport.SetRelayServerData(endpoint.Host, (ushort)endpoint.Port,
-                allocation.AllocationIdBytes, allocation.Key, allocation.ConnectionData, null, endpoint.Secure);
+            UseWebSockets(new RelayServerData(allocation, "wss"));
 
             // 2. On démarre en hôte
             GameManager.PrepareConnection();
@@ -216,9 +214,7 @@ public class LobbyMenu : MonoBehaviour
         {
             string joinCode = room.Data[NetworkGameManager.JoinCodeKey].Value;
             JoinAllocation allocation = await RelayService.Instance.JoinAllocationAsync(joinCode);
-            RelayServerEndpoint endpoint = GetEndpoint(allocation.ServerEndpoints);
-            Transport.SetRelayServerData(endpoint.Host, (ushort)endpoint.Port,
-                allocation.AllocationIdBytes, allocation.Key, allocation.ConnectionData, allocation.HostConnectionData, endpoint.Secure);
+            UseWebSockets(new RelayServerData(allocation, "wss"));
 
             // Netcode charge la scène de jeu de l'hôte automatiquement après la connexion.
             // Si la room est pleine, l'hôte refuse et NetworkGameManager ramène au menu avec le message.
@@ -235,9 +231,14 @@ public class LobbyMenu : MonoBehaviour
         }
     }
 
-    static RelayServerEndpoint GetEndpoint(List<RelayServerEndpoint> endpoints)
+    // WebSockets sécurisés partout : seul protocole possible dans un navigateur, et Relay exige que
+    // l'hôte et les clients utilisent le même, sinon les joueurs web et PC/Mac ne se verraient pas
+    void UseWebSockets(RelayServerData relayData)
     {
-        return endpoints.FirstOrDefault(e => e.ConnectionType == "dtls") ?? endpoints.First();
+        Transport.UseWebSockets = true;
+        // Les images du partage d'écran (ClassStream) font des dizaines de paquets chacune, envoyées à chaque élève assis
+        Transport.MaxPacketQueueSize = 1024;
+        Transport.SetRelayServerData(relayData);
     }
 
     // ---------- Aperçu du perso ----------
@@ -334,18 +335,9 @@ public class LobbyMenu : MonoBehaviour
 
     void BuildUI()
     {
-        if (FindObjectOfType<EventSystem>() == null)
-            new GameObject("EventSystem", typeof(EventSystem), typeof(StandaloneInputModule));
-
+        MenuStyle.EnsureEventSystem();
         BuildBackground();
-
-        var canvasGo = new GameObject("MenuCanvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
-        canvasGo.GetComponent<Canvas>().renderMode = RenderMode.ScreenSpaceOverlay;
-        var scaler = canvasGo.GetComponent<CanvasScaler>();
-        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-        scaler.referenceResolution = new Vector2(1920, 1080);
-        scaler.matchWidthOrHeight = 0.5f;
-        Transform root = canvasGo.transform;
+        Transform root = MenuStyle.OverlayCanvas("MenuCanvas");
 
         // Zone invisible au-dessus du panneau de droite : glisser fait tourner le perso
         Image drag = MenuStyle.Box("DragArea", root, Color.clear);
@@ -439,6 +431,8 @@ public class LobbyMenu : MonoBehaviour
         rt.anchorMin = rt.anchorMax = rt.pivot = Vector2.zero;
         rt.anchoredPosition = new Vector2(110f, 60f);
         rt.sizeDelta = new Vector2(180f, 52f);
+        // Dans un navigateur, Application.Quit ne fait rien : on ferme l'onglet
+        if (Application.platform == RuntimePlatform.WebGLPlayer) quit.gameObject.SetActive(false);
     }
 
     static void Spacer(Transform parent, float height) => MenuStyle.Size(MenuStyle.Rect("Space", parent), height);

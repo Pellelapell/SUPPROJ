@@ -35,9 +35,12 @@ public class NetworkGameManager : MonoBehaviour
     public Material[] palettes;
     [Tooltip("Écart entre les joueurs à l'apparition (ils sont placés en spirale)")]
     public float spawnSpacing = 1.3f;
+    [Tooltip("Objet réseau qui partage l'état des portes (créé par le serveur dans la scène de jeu)")]
+    public GameObject doorNetworkPrefab;
 
     NetworkManager networkManager;
     readonly Dictionary<ulong, int> chosenModel = new Dictionary<ulong, int>();
+    readonly HashSet<ulong> admins = new HashSet<ulong>();
     int spawnCount;
     bool returningToMenu;
 
@@ -46,15 +49,23 @@ public class NetworkGameManager : MonoBehaviour
     float nextHeartbeat, nextCountPush;
     bool countDirty;
 
-    // Nombre de joueurs affiché en jeu (compté localement, valable aussi côté client)
-    int playersOnline;
-    float nextPlayersCount;
-
     void Awake()
     {
         Instance = this;
         networkManager = GetComponent<NetworkManager>();
         DontDestroyOnLoad(gameObject);
+        SceneManager.sceneLoaded += HandleUnitySceneLoaded;
+    }
+
+    void OnDestroy() => SceneManager.sceneLoaded -= HandleUnitySceneLoaded;
+
+    // HUD, chat et partage d'écran ajoutés à la scène de jeu s'ils n'y sont pas (scène générée avec une ancienne version)
+    static void HandleUnitySceneLoaded(Scene scene, LoadSceneMode mode)
+    {
+        if (scene.name != GameScene) return;
+        if (FindObjectOfType<GameHud>() == null) new GameObject("Hud").AddComponent<GameHud>();
+        if (FindObjectOfType<GameChat>() == null) new GameObject("Chat").AddComponent<GameChat>();
+        if (FindObjectOfType<ClassStream>() == null) new GameObject("ClassStream").AddComponent<ClassStream>();
     }
 
     void OnEnable()
@@ -74,10 +85,21 @@ public class NetworkGameManager : MonoBehaviour
         if (Instance == this) Instance = null;
     }
 
-    // À appeler avant StartHost / StartClient : le modèle d'avatar choisi part avec la demande de connexion
+    // À appeler avant StartHost / StartClient : le modèle d'avatar choisi et le rôle (admin / élève)
+    // partent avec la demande de connexion
     public void PrepareConnection()
     {
-        networkManager.NetworkConfig.ConnectionData = new[] { (byte)Mathf.Clamp(PlayerProfile.Model, 0, playerPrefabs.Length - 1) };
+        networkManager.NetworkConfig.ConnectionData = new[]
+        {
+            (byte)Mathf.Clamp(PlayerProfile.Model, 0, playerPrefabs.Length - 1),
+            (byte)(AppRole.IsAdmin ? 1 : 0),
+        };
+    }
+
+    // Serveur : ce joueur a-t-il lancé le jeu Admin ? (portes, etc.)
+    public bool IsAdmin(ulong clientId)
+    {
+        return clientId == NetworkManager.ServerClientId ? AppRole.IsAdmin : admins.Contains(clientId);
     }
 
     // Appelé par l'hôte une fois la room annoncée : il charge la scène de jeu, les clients y arrivent en se connectant
@@ -98,12 +120,6 @@ public class NetworkGameManager : MonoBehaviour
     void Update()
     {
         float now = Time.unscaledTime;
-        if (now >= nextPlayersCount)
-        {
-            nextPlayersCount = now + 1f;
-            playersOnline = FindObjectsOfType<NetworkPlayer>().Length;
-        }
-
         if (hostLobbyId == null || !networkManager.IsServer) return;
 
         // Sans ping toutes les 30 s, Unity Lobby considère la room inactive et ne la liste plus
@@ -139,7 +155,9 @@ public class NetworkGameManager : MonoBehaviour
             return;
         }
 
-        chosenModel[request.ClientNetworkId] = request.Payload != null && request.Payload.Length > 0 ? request.Payload[0] : 0;
+        byte[] payload = request.Payload;
+        chosenModel[request.ClientNetworkId] = payload != null && payload.Length > 0 ? payload[0] : 0;
+        if (payload != null && payload.Length > 1 && payload[1] == 1) admins.Add(request.ClientNetworkId);
         response.Approved = true;
         response.CreatePlayerObject = false; // le perso est créé à l'arrivée dans la scène de jeu
     }
@@ -155,6 +173,10 @@ public class NetworkGameManager : MonoBehaviour
     void HandleSceneLoaded(string sceneName, LoadSceneMode mode, List<ulong> clientsCompleted, List<ulong> clientsTimedOut)
     {
         if (sceneName != GameScene) return;
+
+        if (doorNetworkPrefab != null && DoorNetwork.Instance == null)
+            Instantiate(doorNetworkPrefab).GetComponent<NetworkObject>().Spawn(true);
+
         foreach (ulong clientId in clientsCompleted)
             SpawnPlayer(clientId);
     }
@@ -195,6 +217,7 @@ public class NetworkGameManager : MonoBehaviour
         if (networkManager.IsServer)
         {
             chosenModel.Remove(clientId);
+            admins.Remove(clientId);
             countDirty = true;
             return;
         }
@@ -232,19 +255,5 @@ public class NetworkGameManager : MonoBehaviour
     {
         try { await call(); }
         catch (Exception e) { Debug.LogWarning(e); }
-    }
-
-    void OnGUI()
-    {
-        if (SceneManager.GetActiveScene().name != GameScene) return;
-
-        GUILayout.BeginArea(new Rect(Screen.width - 230f, 10f, 220f, 180f), GUI.skin.box);
-        GUILayout.Label($"{RoomName ?? "Room"}  —  {playersOnline}/{MaxPlayers} joueurs");
-        GUILayout.Label(networkManager.IsHost ? "Tu héberges la room" : "Connecté à la room");
-        GUILayout.Label("ZQSD : marcher   Maj : courir");
-        GUILayout.Label("E : saluer   Entrée : chat");
-        if (GUILayout.Button("Quitter la partie", GUILayout.Height(30f)))
-            ReturnToMenu(networkManager.IsHost ? null : "Tu as quitté la partie.");
-        GUILayout.EndArea();
     }
 }

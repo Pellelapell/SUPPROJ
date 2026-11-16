@@ -49,10 +49,11 @@ public static class MultiplayerSetupBuilder
         AnimatorController controller = AnimationTestSceneBuilder.CreatePlayerController(ControllerPath);
 
         GameObject[] prefabs = Characters.Select(c => CreatePlayerPrefab(c, controller)).ToArray();
-        NetworkPrefabsList prefabsList = CreatePrefabsList(prefabs);
+        GameObject doorNetwork = CreateDoorNetworkPrefab();
+        NetworkPrefabsList prefabsList = CreatePrefabsList(prefabs.Append(doorNetwork).ToArray());
 
         CreateGameScene();
-        CreateMenuScene(prefabs, prefabsList, LoadPalettes(), controller);
+        CreateMenuScene(prefabs, prefabsList, LoadPalettes(), controller, doorNetwork);
         SetBuildScenes();
 
         // Pour tester à plusieurs sur le même PC (éditeur + build), le jeu doit tourner même sans le focus
@@ -87,7 +88,28 @@ public static class MultiplayerSetupBuilder
         player.walkSpeed = AnimationTestSceneBuilder.WalkSpeed;
         player.runSpeed = AnimationTestSceneBuilder.RunSpeed;
 
-        string path = NetDir + "/NetPlayer_" + System.IO.Path.GetFileName(character) + ".prefab";
+        // Collisions avec les murs, meubles et portes fermées
+        var body = go.AddComponent<CharacterController>();
+        body.center = new Vector3(0f, 0.9f, 0f);
+        body.height = 1.8f;
+        body.radius = 0.28f;
+        body.stepOffset = 0.3f;
+        body.skinWidth = 0.03f;
+
+        return SaveNetworkPrefab(go, NetDir + "/NetPlayer_" + System.IO.Path.GetFileName(character) + ".prefab");
+    }
+
+    // Objet réseau unique qui partage l'état des portes (créé par le serveur dans la scène de jeu)
+    static GameObject CreateDoorNetworkPrefab()
+    {
+        var go = new GameObject("DoorNetwork");
+        go.AddComponent<NetworkObject>();
+        go.AddComponent<DoorNetwork>();
+        return SaveNetworkPrefab(go, NetDir + "/DoorNetwork.prefab");
+    }
+
+    static GameObject SaveNetworkPrefab(GameObject go, string path)
+    {
         PrefabUtility.SaveAsPrefabAsset(go, path);
         Object.DestroyImmediate(go);
 
@@ -123,7 +145,8 @@ public static class MultiplayerSetupBuilder
             .ToArray();
     }
 
-    static void CreateMenuScene(GameObject[] prefabs, NetworkPrefabsList prefabsList, Material[] palettes, AnimatorController controller)
+    static void CreateMenuScene(GameObject[] prefabs, NetworkPrefabsList prefabsList, Material[] palettes, AnimatorController controller,
+        GameObject doorNetwork)
     {
         var scene = EditorSceneManager.NewScene(NewSceneSetup.DefaultGameObjects, NewSceneMode.Single);
 
@@ -152,6 +175,7 @@ public static class MultiplayerSetupBuilder
         var gameManager = networkGo.AddComponent<NetworkGameManager>();
         gameManager.playerPrefabs = prefabs;
         gameManager.palettes = palettes;
+        gameManager.doorNetworkPrefab = doorNetwork;
 
         var menu = new GameObject("LobbyMenu").AddComponent<LobbyMenu>();
         menu.previewSpot = previewSpot;
@@ -232,40 +256,25 @@ public static class MultiplayerSetupBuilder
 
         var ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
         ground.name = "Ground";
-        ground.transform.localScale = new Vector3(5f, 1f, 5f);
+        ground.transform.localScale = new Vector3(20f, 1f, 20f); // 200 m : le campus et la rue tiennent dessus
         ground.GetComponent<MeshRenderer>().sharedMaterial = AnimationTestSceneBuilder.GroundMaterial();
 
+        // Même cadrage que CameraFollow une fois le perso apparu
         var cam = Camera.main;
-        cam.transform.position = new Vector3(0f, 6f, -9f);
-        cam.transform.LookAt(Vector3.zero);
+        cam.transform.position = new Vector3(0f, 9f, -6.5f);
+        cam.transform.LookAt(new Vector3(0f, 1.2f, 0f));
 
-        // Quelques décors City People pour se repérer
-        string props = AnimationTestSceneBuilder.CityPrefabs + "PROPS/dummy props/";
-        PlaceProp(props + "building_block_A.prefab", new Vector3(-12f, 0f, 14f), 180f);
-        PlaceProp(props + "building_block_B.prefab", new Vector3(0f, 0f, 16f), 180f);
-        PlaceProp(props + "building_block_C.prefab", new Vector3(12f, 0f, 14f), 180f);
-        PlaceProp(props + "building_block_D.prefab", new Vector3(-16f, 0f, 0f), 90f);
-        PlaceProp(props + "dprop_streetSign.prefab", new Vector3(5f, 0f, 6f), 0f);
-        PlaceProp(props + "dprop_trashBin.prefab", new Vector3(-5f, 0f, 6f), 0f);
-        PlaceProp(props + "dprop_bicycle.prefab", new Vector3(7f, 0f, -4f), 60f);
-        PlaceProp(props + "dprop_plantPot.prefab", new Vector3(-7f, 0f, -4f), 0f);
+        // Bâtiment SUPINFO (hall, salles, amphi) et parvis
+        CampusMapBuilder.Build();
 
-        // Chat écrit
+        // HUD (room, commandes, pseudos, pause) et chat écrit
+        new GameObject("Hud").AddComponent<GameHud>();
         new GameObject("Chat").AddComponent<GameChat>();
 
-        EditorSceneManager.SaveScene(scene, GameScenePath);
-    }
+        // Partage d'écran / caméra de l'organisateur vers les élèves assis
+        new GameObject("ClassStream").AddComponent<ClassStream>();
 
-    static void PlaceProp(string path, Vector3 position, float yaw)
-    {
-        var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
-        if (prefab == null)
-        {
-            Debug.LogWarning("Décor introuvable : " + path);
-            return;
-        }
-        var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
-        go.transform.SetPositionAndRotation(position, Quaternion.Euler(0f, yaw, 0f));
+        EditorSceneManager.SaveScene(scene, GameScenePath);
     }
 
     // MainMenu en premier (scène de démarrage), puis Game, puis les scènes déjà présentes

@@ -1,11 +1,15 @@
+using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Netcode;
 using UnityEngine;
 
 // Perso d'un joueur en ligne. Seul le propriétaire lit les touches ; position et animations sont synchronisées
-// par ClientNetworkTransform et OwnerNetworkAnimator.
+// par ClientNetworkTransform et OwnerNetworkAnimator. F : s'asseoir / se lever (et porte pour l'admin).
 public class NetworkPlayer : NetworkBehaviour
 {
+    public static readonly List<NetworkPlayer> All = new List<NetworkPlayer>();
+    public static NetworkPlayer Local { get; private set; }
+
     public float walkSpeed = 1.5f;
     public float runSpeed = 5f;
     public float acceleration = 6f;
@@ -20,24 +24,42 @@ public class NetworkPlayer : NetworkBehaviour
     public readonly NetworkVariable<int> Palette = new NetworkVariable<int>(
         0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Owner);
 
+    // Chaise occupée (Seat.index), -1 debout
+    public readonly NetworkVariable<int> SeatIndex = new NetworkVariable<int>(
+        -1, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Owner);
+
+    [Tooltip("Distance max pour ouvrir / fermer une porte (admin)")]
+    public float doorReach = 2.5f;
+    [Tooltip("Distance max pour s'asseoir sur une chaise")]
+    public float seatReach = 1.3f;
+
     Animator animator;
     OwnerNetworkAnimator networkAnimator;
+    CharacterController controller;
     float currentSpeed;
-    GUIStyle nameStyle;
 
     void Awake()
     {
         animator = GetComponentInChildren<Animator>();
         networkAnimator = GetComponentInChildren<OwnerNetworkAnimator>();
+        controller = GetComponent<CharacterController>();
+        if (animator != null && animator.GetComponent<SeatedPose>() == null) animator.gameObject.AddComponent<SeatedPose>();
     }
+
+    public Seat CurrentSeat => SeatIndex.Value >= 0 ? Seat.Get(SeatIndex.Value) : null;
 
     public override void OnNetworkSpawn()
     {
+        All.Add(this);
         Palette.OnValueChanged += (_, index) => ApplyPalette(index);
         ApplyPalette(Palette.Value);
 
+        // Les autres joueurs sont placés par le réseau : pas de collisions de leur côté (on se traverse entre joueurs)
+        if (controller != null) controller.enabled = IsOwner;
+
         if (!IsOwner) return;
 
+        Local = this;
         PlayerName.Value = new FixedString64Bytes(PlayerProfile.Name);
         Palette.Value = PlayerProfile.Palette;
 
@@ -48,6 +70,12 @@ public class NetworkPlayer : NetworkBehaviour
             if (follow == null) follow = cam.gameObject.AddComponent<CameraFollow>();
             follow.target = transform;
         }
+    }
+
+    public override void OnNetworkDespawn()
+    {
+        All.Remove(this);
+        if (Local == this) Local = null;
     }
 
     void ApplyPalette(int index)
@@ -85,25 +113,91 @@ public class NetworkPlayer : NetworkBehaviour
         if (!IsSpawned || !IsOwner) return;
 
         float dt = Time.deltaTime;
-        // Pendant la saisie dans le chat, les touches servent au texte
-        bool typing = GameChat.IsTyping;
+        // Pendant la saisie dans le chat (ou le menu pause), les touches ne déplacent pas le perso
+        bool typing = GameChat.IsTyping || GameHud.MenuOpen;
         Vector3 input = typing ? Vector3.zero : ReadMoveInput();
+
+        if (!typing && AppRole.IsAdmin && ClassStream.Instance != null)
+        {
+            if (Input.GetKeyDown(KeyCode.P)) ClassStream.Instance.Toggle(MediaSource.Screen);
+            if (Input.GetKeyDown(KeyCode.C)) ClassStream.Instance.Toggle(MediaSource.Camera);
+        }
+
+        // Assis : on reste sur la chaise, F ou une touche de déplacement relève
+        if (SeatIndex.Value >= 0)
+        {
+            currentSpeed = 0f;
+            animator.SetFloat(SpeedId, 0f);
+            if (!typing && (Input.GetKeyDown(KeyCode.F) || input.sqrMagnitude > 0.01f)) StandUp();
+            return;
+        }
 
         float maxSpeed = !typing && Input.GetKey(KeyCode.LeftShift) ? runSpeed : walkSpeed;
         currentSpeed = Mathf.MoveTowards(currentSpeed, input.magnitude * maxSpeed, acceleration * dt);
 
-        if (input.sqrMagnitude > 0.01f)
+        // Première personne : Z avance dans la direction du regard, Q / D en pas de côté, le corps suit le regard
+        CameraFollow view = CameraFollow.Instance;
+        bool firstPerson = view != null && view.FirstPerson;
+        if (firstPerson)
+        {
+            input = view.Heading * input;
+            transform.rotation = view.Heading;
+        }
+        else if (input.sqrMagnitude > 0.01f)
         {
             Quaternion targetRot = Quaternion.LookRotation(input);
             transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, turnSpeed * dt);
         }
-        transform.position += transform.forward * currentSpeed * dt;
+        if (input.sqrMagnitude > 0.01f) moveDirection = input.normalized;
+        // CharacterController : bloqué par les murs, les meubles et les portes fermées
+        Vector3 move = (firstPerson ? moveDirection : transform.forward) * currentSpeed;
+        if (controller != null && controller.enabled)
+            controller.Move((move + Vector3.down * 4f) * dt);
+        else
+            transform.position += move * dt;
         animator.SetFloat(SpeedId, currentSpeed);
 
         // Saluer seulement à l'arrêt (le salut est immobile, se déplacer l'annule)
         bool wavePressed = !typing && (Input.GetKeyDown(KeyCode.E) || Input.GetKeyDown(KeyCode.Space));
         if (wavePressed && currentSpeed < 0.1f) networkAnimator.SetTrigger(WaveId);
+
+        // F : la porte la plus proche (admin), sinon la chaise libre la plus proche
+        if (!typing && Input.GetKeyDown(KeyCode.F))
+        {
+            SyncedDoor door = NearbyDoor();
+            Seat seat = NearbySeat();
+            if (door != null) DoorNetwork.Instance.RequestToggle(door.index);
+            else if (seat != null) SitDown(seat);
+        }
     }
+
+    // Ce que F ferait ici (aussi utilisé par l'HUD pour afficher l'action)
+    public SyncedDoor NearbyDoor() =>
+        AppRole.IsAdmin && DoorNetwork.Instance != null ? SyncedDoor.Nearest(transform.position, doorReach) : null;
+
+    public Seat NearbySeat() => Seat.NearestFree(transform.position, seatReach, this);
+
+    // ---------- Chaises ----------
+
+    void SitDown(Seat seat)
+    {
+        currentSpeed = 0f;
+        if (controller != null) controller.enabled = false;
+        transform.SetPositionAndRotation(seat.point, seat.Rotation);
+        SeatIndex.Value = seat.index;
+        if (ClassStream.Instance != null) ClassStream.Instance.SetWatching(true);
+    }
+
+    void StandUp()
+    {
+        Seat seat = CurrentSeat;
+        SeatIndex.Value = -1;
+        if (seat != null) transform.position = seat.StandPoint;
+        if (controller != null) controller.enabled = true;
+        if (ClassStream.Instance != null) ClassStream.Instance.SetWatching(false);
+    }
+
+    Vector3 moveDirection = Vector3.forward;
 
     // ZQSD (AZERTY), WASD (QWERTY) et flèches
     static Vector3 ReadMoveInput()
@@ -114,21 +208,5 @@ public class NetworkPlayer : NetworkBehaviour
         if (Input.GetKey(KeyCode.Z) || Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow)) z += 1f;
         if (Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.DownArrow)) z -= 1f;
         return Vector3.ClampMagnitude(new Vector3(x, 0f, z), 1f);
-    }
-
-    // Pseudo au-dessus de la tête
-    void OnGUI()
-    {
-        var cam = Camera.main;
-        if (!IsSpawned || cam == null) return;
-        Vector3 p = cam.WorldToScreenPoint(transform.position + Vector3.up * 2.1f);
-        if (p.z < 0f) return;
-
-        if (nameStyle == null)
-        {
-            nameStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, fontSize = 15, fontStyle = FontStyle.Bold };
-        }
-        nameStyle.normal.textColor = IsOwner ? new Color(1f, 0.85f, 0.3f) : Color.white;
-        GUI.Label(new Rect(p.x - 90f, Screen.height - p.y - 12f, 180f, 24f), PlayerName.Value.ToString(), nameStyle);
     }
 }

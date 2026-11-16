@@ -81,6 +81,61 @@ public static class MenuStyle
 
     // ---------- Fabriques ----------
 
+    // Canvas plein écran, mis à l'échelle sur une base 1920x1080
+    public static Transform OverlayCanvas(string name, int sortingOrder = 0)
+    {
+        var go = new GameObject(name, typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
+        var canvas = go.GetComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        canvas.sortingOrder = sortingOrder;
+        var scaler = go.GetComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1920, 1080);
+        scaler.matchWidthOrHeight = 0.5f;
+        return go.transform;
+    }
+
+    public static void EnsureEventSystem()
+    {
+        if (UnityEngine.Object.FindObjectOfType<EventSystem>() == null)
+            new GameObject("EventSystem", typeof(EventSystem), typeof(StandaloneInputModule));
+    }
+
+    // Place un élément dans un coin / bord : anchor = pivot (ex : (0,1) = haut gauche)
+    public static RectTransform Place(Component c, Vector2 anchor, Vector2 position, Vector2 size)
+    {
+        var rt = (RectTransform)c.transform;
+        rt.anchorMin = rt.anchorMax = rt.pivot = anchor;
+        rt.anchoredPosition = position;
+        rt.sizeDelta = size;
+        return rt;
+    }
+
+    // Conteneur qui prend la taille de son contenu
+    public static void FitContent(Component c)
+    {
+        var fitter = c.gameObject.AddComponent<ContentSizeFitter>();
+        fitter.horizontalFit = fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+    }
+
+    // Ombre portée pour lire le texte par-dessus la scène 3D
+    public static T WithShadow<T>(T graphic) where T : Graphic
+    {
+        var shadow = graphic.gameObject.AddComponent<Shadow>();
+        shadow.effectColor = new Color(0f, 0f, 0f, 0.6f);
+        shadow.effectDistance = new Vector2(1.5f, -1.5f);
+        return graphic;
+    }
+
+    // Touche de clavier dessinée ("ZQSD", "MAJ"...) suivie de son action
+    public static void KeyHint(Transform parent, string key, string action, int size = 18)
+    {
+        Image cap = Box("Key " + key, parent, new Color(1f, 1f, 1f, 0.14f), RoundedSmall);
+        Row(cap, 0f, new RectOffset(10, 10, 4, 4)).childAlignment = TextAnchor.MiddleCenter;
+        Label("Text", cap.transform, key, size - 2, Text, TextAnchor.MiddleCenter, FontStyle.Bold);
+        WithShadow(Label(action, parent, action, size, TextDim));
+    }
+
     public static RectTransform Rect(string name, Transform parent)
     {
         var go = new GameObject(name, typeof(RectTransform));
