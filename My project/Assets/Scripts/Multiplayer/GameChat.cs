@@ -56,7 +56,7 @@ public class GameChat : MonoBehaviour
     void Update()
     {
         bool enter = Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter);
-        if (!typing && enter && !GameHud.MenuOpen)
+        if (!typing && enter && !GameHud.Blocking)
             SetTyping(true);
         else if (typing && enter)
             Send();

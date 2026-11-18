@@ -146,11 +146,12 @@ public static partial class CampusMapBuilder
         }
 
         // Décor immobile regroupé en gros maillages (static batching) : beaucoup moins d'appels de rendu.
-        // Pas les portes (elles bougent), les écrans (images changées en jeu) ni les écritures (TextMesh)
+        // Pas les portes ni les battants d'ascenseur (ils bougent), les écrans (images changées en jeu) ni les écritures (TextMesh)
         Transform doors = Group("Doors");
         foreach (Renderer r in root.GetComponentsInChildren<Renderer>(true))
         {
-            if (r.transform.IsChildOf(doors) || r.GetComponentInParent<ScreenDisplay>() != null || r.GetComponent<TextMesh>() != null)
+            if (r.transform.IsChildOf(doors) || r.GetComponentInParent<ScreenDisplay>() != null || r.GetComponent<TextMesh>() != null
+                || r.GetComponentInParent<ElevatorStop>() != null)
                 continue;
             GameObjectUtility.SetStaticEditorFlags(r.gameObject, StaticEditorFlags.BatchingStatic);
         }
@@ -230,19 +231,24 @@ public static partial class CampusMapBuilder
 
     // Mur le long de X (à z fixe), avec des ouvertures (centre x, largeur, hauteur). Au-dessus d'une ouverture
     // moins haute que le mur, un linteau complète le mur.
+    // Les murs vont d'un peu sous le sol (WallBottom) jusque sous le sol de l'étage du dessus (WallTop) : ceux d'un étage
+    // rejoignent ceux de l'étage du dessous sans fente, même dans la cage d'escalier où il n'y a pas de dalle ;
+    // le plafond reste à WallHeight
+    const float WallTop = Floor1Y - 0.08f, WallBottom = -0.1f;
+
     static void WallAlongX(string name, float z, float x0, float x1, params (float center, float width, float height)[] gaps)
     {
         float x = x0;
         foreach (var gap in gaps.OrderBy(g => g.center))
         {
             float left = gap.center - gap.width / 2f, right = gap.center + gap.width / 2f;
-            WallSegment(name, new Vector3((x + left) / 2f, 0f, z), new Vector3(left - x, WallHeight, WallThickness));
-            if (gap.height < WallHeight)
-                Block(name + " Lintel", new Vector3(gap.center, (gap.height + WallHeight) / 2f, z),
-                    new Vector3(gap.width, WallHeight - gap.height, WallThickness), wall, wallGroup);
+            WallSegment(name, new Vector3((x + left) / 2f, 0f, z), new Vector3(left - x, WallTop, WallThickness));
+            if (gap.height < WallTop)
+                Block(name + " Lintel", new Vector3(gap.center, (gap.height + WallTop) / 2f, z),
+                    new Vector3(gap.width, WallTop - gap.height, WallThickness), wall, wallGroup);
             x = right;
         }
-        WallSegment(name, new Vector3((x + x1) / 2f, 0f, z), new Vector3(x1 - x, WallHeight, WallThickness));
+        WallSegment(name, new Vector3((x + x1) / 2f, 0f, z), new Vector3(x1 - x, WallTop, WallThickness));
     }
 
     // Mur le long de Z (à x fixe), mêmes ouvertures que WallAlongX (centre z, largeur, hauteur)
@@ -252,19 +258,21 @@ public static partial class CampusMapBuilder
         foreach (var gap in gaps.OrderBy(g => g.center))
         {
             float low = gap.center - gap.width / 2f, high = gap.center + gap.width / 2f;
-            WallSegment(name, new Vector3(x, 0f, (z + low) / 2f), new Vector3(WallThickness, WallHeight, low - z));
-            if (gap.height < WallHeight)
-                Block(name + " Lintel", new Vector3(x, (gap.height + WallHeight) / 2f, gap.center),
-                    new Vector3(WallThickness, WallHeight - gap.height, gap.width), wall, wallGroup);
+            WallSegment(name, new Vector3(x, 0f, (z + low) / 2f), new Vector3(WallThickness, WallTop, low - z));
+            if (gap.height < WallTop)
+                Block(name + " Lintel", new Vector3(x, (gap.height + WallTop) / 2f, gap.center),
+                    new Vector3(WallThickness, WallTop - gap.height, gap.width), wall, wallGroup);
             z = high;
         }
-        WallSegment(name, new Vector3(x, 0f, (z + z1) / 2f), new Vector3(WallThickness, WallHeight, z1 - z));
+        WallSegment(name, new Vector3(x, 0f, (z + z1) / 2f), new Vector3(WallThickness, WallTop, z1 - z));
     }
 
+    // Pan de mur plein : de WallBottom à la hauteur donnée
     static void WallSegment(string name, Vector3 bottomCenter, Vector3 size)
     {
         if (size.x <= 0.01f || size.z <= 0.01f) return;
-        Block(name, bottomCenter + Vector3.up * size.y / 2f, size, wall, wallGroup);
+        size.y -= WallBottom;
+        Block(name, bottomCenter + Vector3.up * (WallBottom + size.y / 2f), size, wall, wallGroup);
     }
 
     // Taille du cadre de porte, pour découper les murs à la bonne largeur
@@ -354,45 +362,73 @@ public static partial class CampusMapBuilder
 
     }
 
-    // Escalier vers l'étage 1 en deux volées côte à côte avec un demi-tour (180°) sur un palier au fond (sud) :
-    // on entre par le nord (salle de pause) dans la moitié gauche, on monte vers le sud, demi-tour sur le palier,
-    // puis on monte vers le nord par la moitié droite et on arrive dans le couloir de l'étage 1.
-    // Toujours affiché (AlwaysVisible), quel que soit l'étage où l'on est.
+    // Escalier en deux volées côte à côte avec un demi-tour (180°) sur un palier au fond (nord), répété à chaque étage
+    // (même cage, les volées empilées) : on entre par le sud dans la moitié ouest, palier plat au pied, on monte vers le nord,
+    // demi-tour sur le palier, on monte vers le sud par la moitié est jusqu'au palier plat du haut, au niveau de l'étage :
+    // on y tourne vers l'est pour entrer dans l'étage, ou on traverse vers l'ouest pour continuer à monter.
+    // Chaque tronçon est affiché sur les deux étages qu'il relie (AlwaysVisible).
+    const float StairsLandingDepth = 3f, StairsFlatDepth = 2f;
+    const int StairsStepsPerFlight = 8;
+    const float StairsX0 = MinX + WallThickness / 2f, StairsInnerX1 = StairsX1 - WallThickness / 2f;
+    const float StairsMidX = (StairsX0 + StairsInnerX1) / 2f;
+    const float StairsMidLandingZ0 = StairsZ1 - WallThickness / 2f - StairsLandingDepth;
+    const float StairsFlightZ0 = StairsZ0 + StairsFlatDepth;    // fin des paliers plats du bas et du haut
+
     static void BuildStairs()
     {
-        Transform group = Group("Stairs");
-        group.gameObject.AddComponent<AlwaysVisible>();
         wallGroup = "Stairs";
         WallAlongZ("Wall Stairs E", StairsX1, StairsZ0, StairsZ1);
-        WallAlongX("Wall Stairs S", StairsZ0, MinX, StairsX1);
-
-        const int stepsPerFlight = 8;
-        const float landingDepth = 3f;
-        float rise = Floor1Y / (2 * stepsPerFlight + 1); // palier = une marche entre les deux volées
-        float x0 = MinX + WallThickness / 2f, x1 = StairsX1 - WallThickness / 2f, xMid = (x0 + x1) / 2f;
-        float landingZ0 = StairsZ0 + WallThickness / 2f, landingZ1 = landingZ0 + landingDepth;
-        float run = (StairsZ1 - landingZ1) / stepsPerFlight;
-        float leftX0 = x0, leftX1 = xMid - WallThickness / 2f, rightX0 = xMid + WallThickness / 2f, rightX1 = x1;
-
-        for (int i = 0; i < stepsPerFlight; i++)
-        {
-            float topDown = rise * (i + 1);                     // volée 1 : vers le sud, depuis l'entrée
-            Block("Step A" + (i + 1), new Vector3((leftX0 + leftX1) / 2f, topDown / 2f, StairsZ1 - run * (i + 0.5f)),
-                new Vector3(leftX1 - leftX0, topDown, run), wood, "Stairs");
-            float topBack = rise * (stepsPerFlight + 2 + i);    // volée 2 : vers le nord, après le palier
-            Block("Step B" + (i + 1), new Vector3((rightX0 + rightX1) / 2f, topBack / 2f, landingZ1 + run * (i + 0.5f)),
-                new Vector3(rightX1 - rightX0, topBack, run), wood, "Stairs");
-        }
-        float landingTop = rise * (stepsPerFlight + 1);
-        Block("Landing", new Vector3((x0 + x1) / 2f, landingTop / 2f, (landingZ0 + landingZ1) / 2f),
-            new Vector3(x1 - x0, landingTop, landingDepth), wood, "Stairs");
-
-        // Mur entre les deux volées, depuis le palier jusqu'à l'entrée
-        WallAlongZ("Wall Stairs Mid", xMid, landingZ1, StairsZ1);
+        WallAlongX("Wall Stairs N", StairsZ1, MinX, StairsX1);
+        WallAlongZ("Wall Stairs Mid", StairsMidX, StairsZ0, StairsMidLandingZ0); // entre les volées, depuis l'entrée
         wallGroup = "Building";
+        StairsRun(0f, true, 0, 1);
 
-        // Panneau à l'entrée, sur la face nord de la volée qui monte
-        Sign("ESCALIER ÉTAGE 1", new Vector3((rightX0 + rightX1) / 2f, 1.6f, StairsZ1 + 0.02f), 0.2f, MenuStyle.Text * 0.95f, 180f);
+        // Panneau à l'entrée, sur la face sud du palier du haut
+        Sign("ESCALIER", new Vector3((StairsMidX + StairsInnerX1) / 2f, 1.6f, StairsZ0 - 0.02f), 0.2f, MenuStyle.Text * 0.95f);
+    }
+
+    // Un tronçon d'escalier d'un étage au suivant, dont le pied est à l'altitude locale baseY, dans le groupe "Stairs"
+    // de l'étage en cours (affiché des étages minLevel à maxLevel). solid : marches pleines jusqu'au sol (rez-de-chaussée) ;
+    // sinon dalles, pour laisser passer sous le tronçon du dessous, avec un palier bas qui rejoint le palier d'arrivée.
+    static void StairsRun(float baseY, bool solid, int minLevel, int maxLevel)
+    {
+        Transform group = Group("Stairs");
+        var range = group.GetComponent<AlwaysVisible>();
+        if (range == null) range = group.gameObject.AddComponent<AlwaysVisible>();
+        range.minLevel = minLevel;
+        range.maxLevel = maxLevel;
+
+        const float slab = 0.25f;
+        float rise = Floor1Y / (2 * StairsStepsPerFlight + 2); // paliers du milieu et du haut = une marche chacun
+        float run = (StairsMidLandingZ0 - StairsFlightZ0) / StairsStepsPerFlight;
+        float upX0 = StairsX0, upX1 = StairsMidX - WallThickness / 2f, backX0 = StairsMidX + WallThickness / 2f, backX1 = StairsInnerX1;
+
+        void Tread(string name, float x0, float x1, float z0, float z1, float top)
+        {
+            float bottom = solid ? 0f : Mathf.Max(0f, top - slab);
+            Block(name, new Vector3((x0 + x1) / 2f, baseY + (top + bottom) / 2f, (z0 + z1) / 2f),
+                new Vector3(x1 - x0, top - bottom, z1 - z0), wood, "Stairs");
+        }
+
+        for (int i = 0; i < StairsStepsPerFlight; i++)
+        {
+            float z = StairsFlightZ0 + run * i;                 // volée 1 : vers le nord, depuis le palier du bas
+            Tread("Step A" + (i + 1), upX0, upX1, z, z + run, rise * (i + 1));
+            z = StairsMidLandingZ0 - run * (i + 1);             // volée 2 : vers le sud, après le palier du milieu
+            Tread("Step B" + (i + 1), backX0, backX1, z, z + run, rise * (StairsStepsPerFlight + 2 + i));
+        }
+        Tread("Landing", StairsX0, StairsInnerX1, StairsMidLandingZ0, StairsZ1 - WallThickness / 2f, rise * (StairsStepsPerFlight + 1));
+        // Palier plat du haut, au niveau du sol de l'étage suivant
+        Tread("Landing Top", backX0, backX1, StairsZ0, StairsFlightZ0, Floor1Y);
+        if (!solid)
+        {
+            // Palier plat du bas (au-dessus de l'entrée du tronçon du dessous), relié au palier d'arrivée de ce dessous
+            Block("Landing Bottom", new Vector3((upX0 + backX0) / 2f, baseY - slab / 2f, (StairsZ0 + StairsFlightZ0) / 2f),
+                new Vector3(backX0 - upX0, slab, StairsFlatDepth), wood, "Stairs");
+            // Mur entre les deux volées
+            Block("Wall Stairs Mid", new Vector3(StairsMidX, baseY + (WallBottom + WallTop) / 2f, (StairsFlightZ0 + StairsMidLandingZ0) / 2f),
+                new Vector3(WallThickness, WallTop - WallBottom, StairsMidLandingZ0 - StairsFlightZ0), wall, "Stairs");
+        }
     }
 
     // Toilettes : entrée sans porte côté hall (mur ouest), surmontée d'un linteau avec le nom, lavabos au nord, cabines le long du mur côté amphi
@@ -446,15 +482,45 @@ public static partial class CampusMapBuilder
         Block("Elevator Roof", new Vector3((ToiletsX0 + ElevatorX1) / 2f, WallHeight + 0.05f, (ElevatorZ0 + AmphiZ1) / 2f),
             new Vector3(ElevatorDepth + WallThickness, 0.1f, ElevatorWidth + WallThickness), wall);
 
-        // Portes (deux battants coulissants fermés) et encadrement, sur la face ouest du mur
-        float doorZ = (ElevatorZ0 + AmphiZ1) / 2f, faceX = ToiletsX0 - WallThickness / 2f;
+        // Portes sur la face ouest du mur, tournées vers le couloir (ouest)
+        ElevatorDoors(new Vector3(ToiletsX0 - WallThickness / 2f, 0f, (ElevatorZ0 + AmphiZ1) / 2f), -90f, 0, 0, "RDC");
+    }
+
+    // Portes d'ascenseur utilisables (ElevatorStop) : encadrement sombre, deux battants coulissants, bouton, panneau.
+    // face : centre de la porte sur la face du mur, au sol ; yaw : direction du couloir (vers l'extérieur de la cabine)
+    static void ElevatorDoors(Vector3 face, float yaw, int level, int number, string label)
+    {
         const float leafWidth = 0.8f, leafHeight = 2.1f;
-        Block("Elevator Frame", new Vector3(faceX - 0.02f, (leafHeight + 0.1f) / 2f, doorZ), new Vector3(0.04f, leafHeight + 0.1f, leafWidth * 2f + 0.2f), monitor);
-        foreach (float side in new[] { -1f, 1f })
-            Block("Elevator Door", new Vector3(faceX - 0.05f, leafHeight / 2f, doorZ + side * (leafWidth / 2f + 0.005f)),
-                new Vector3(0.03f, leafHeight, leafWidth - 0.01f), metal);
-        Block("Elevator Button", new Vector3(faceX - 0.04f, 1.1f, doorZ + leafWidth + 0.35f), new Vector3(0.04f, 0.16f, 0.09f), accent);
-        Sign("ASCENSEUR", new Vector3(faceX - 0.03f, (leafHeight + WallHeight) / 2f + 0.05f, doorZ), 0.16f, MenuStyle.Text * 0.95f, 90f);
+        Quaternion rotation = Quaternion.Euler(0f, yaw, 0f);
+        var stopGo = new GameObject("Elevator " + label);
+        stopGo.transform.SetParent(Group("Elevators"), false);
+        stopGo.transform.SetPositionAndRotation(face, rotation);
+
+        Transform Piece(string name, Vector3 local, Vector3 size, Material material)
+        {
+            var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            go.name = name;
+            go.transform.SetParent(stopGo.transform, false);
+            go.transform.localPosition = local;
+            go.transform.localScale = size;
+            go.GetComponent<MeshRenderer>().sharedMaterial = material;
+            return go.transform;
+        }
+        Piece("Elevator Frame", new Vector3(0f, (leafHeight + 0.1f) / 2f, 0.02f), new Vector3(leafWidth * 2f + 0.2f, leafHeight + 0.1f, 0.04f), monitor);
+        var leaves = new Transform[2];
+        for (int i = 0; i < 2; i++)
+            leaves[i] = Piece("Elevator Door", new Vector3((i == 0 ? -1f : 1f) * (leafWidth / 2f + 0.005f), leafHeight / 2f, 0.05f),
+                new Vector3(leafWidth - 0.01f, leafHeight, 0.03f), metal);
+        Piece("Elevator Button", new Vector3(leafWidth + 0.35f, 1.1f, 0.04f), new Vector3(0.09f, 0.16f, 0.04f), accent);
+        Sign("ASCENSEUR  ·  " + label.ToUpperInvariant(), face + rotation * new Vector3(0f, (leafHeight + WallHeight) / 2f + 0.05f, 0.03f),
+            0.16f, MenuStyle.Text * 0.95f, yaw + 180f);
+
+        var stop = stopGo.AddComponent<ElevatorStop>();
+        stop.level = level;
+        stop.number = number;
+        stop.label = label;
+        stop.leaves = leaves;
+        stop.leafWidth = leafWidth;
     }
 
     // Amphithéâtre : estrade + grand écran contre le mur est, rangées de bureaux tournées vers l'est avec une allée au centre

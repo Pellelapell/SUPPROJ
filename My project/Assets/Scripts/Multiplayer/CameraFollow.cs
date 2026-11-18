@@ -84,9 +84,17 @@ public class CameraFollow : MonoBehaviour
         }
     }
 
+    // Après une téléportation (ascenseur) : la caméra saute avec le perso au lieu de glisser à travers la carte
+    public void SnapTo(Quaternion heading)
+    {
+        if (target == null) return;
+        topPosition = target.position + offset;
+        yaw = heading.eulerAngles.y;
+    }
+
     void Update()
     {
-        bool blocked = IsFocused || target == null || GameChat.IsTyping || GameHud.MenuOpen;
+        bool blocked = IsFocused || target == null || GameChat.IsTyping || GameHud.Blocking;
         LockCursor(FirstPerson && !blocked);
         if (blocked) return;
         float scroll = Input.mouseScrollDelta.y;

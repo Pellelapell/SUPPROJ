@@ -53,6 +53,7 @@ public class Seat : MonoBehaviour
         float bestDistance = maxDistance;
         foreach (Seat s in all)
         {
+            if (!FloorLevel.SameHeight(s.point.y, position.y)) continue; // pas les chaises des autres étages
             float distance = Vector2.Distance(new Vector2(s.point.x, s.point.z), new Vector2(position.x, position.z));
             if (distance < bestDistance && !s.IsTaken(self))
             {

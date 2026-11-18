@@ -4,15 +4,17 @@ using UnityEngine;
 // Positions du plan relevées à ~0,12 m par pixel du dessin puis multipliées par F1Scale (0,5 : étage deux fois plus petit) ;
 // la cage d'escalier garde la taille de l'escalier du rez-de-chaussée. Nord du plan = +Z, 1 unité = 1 m.
 //
-//  44   ┌──────────┬─────┬───────────────┬───────────────────────────┬──────────────┐
-//       │ (fermé)  │     │               │        Salle S1.5        []│              │
-//  33   ├──────[]──┘     │               ├───────────────────────────┤              │
-//       │ Salle S1.4     │  espace       │        Salle S1.2        []│  Salle S1.1  │
-//  18   ├────────────────┤  ouvert       ├────────┬──────┬───────────┤              │
-//       │ Salle S1.3     │               │ WC     │ asc. │    WC     │              │
-//       │               []               └──[ ]───┴─[ ]──┴──────[ ]──┘[]            │
+//  60   ┌──────────┬─────┬───────────────┬───────────────────────────┬──────────────┐
+//       │ (fermé)  │     │               │[]T     Salle S1.5         │              │
+//  44   ├──────[]──┘     │               ├───────────────────────────┤              │
+//       │ Salle S1.4 (↓) │  espace       │ T      Salle S1.2 (←)     │  Salle S1.1  │
+//  24   ├───────T────────┤  ouvert       │[]                         │     (↓)      │
+//       │ Salle S1.3 (↑) │               ├────────┬──────┬───────────┤              │
+//       │                │               │ WC     │ asc. │    WC     │              │
+//       │               []               └──[ ]───┴─[ ]──┴──────[ ]──┘[]     T      │
 //  0    └────────────────┴───────────── couloir ──────────────┤sortie escalier├──────┘
 //      0               23              52                           83    90        113   (unités plan, x F1Scale = mètres)
+//  T = tableau, flèche = sens du regard des élèves
 //
 // Les salles ont une porte réseau (SyncedDoor, ouverte par l'admin), des bureaux collés en rangées face au tableau.
 // Construit dans la même scène que le rez-de-chaussée, au-dessus : la cage d'escalier de l'étage 1 est placée
@@ -22,18 +24,22 @@ public static partial class CampusMapBuilder
 {
     // Enveloppe
     const float F1Scale = 0.5f; // mètres par unité plan
-    const float F1MaxX = F1Scale * 113f, F1MaxZ = F1Scale * 44f;
+    const float F1MaxX = F1Scale * 113f, F1MaxZ = F1Scale * 60f;
     // Aile ouest : S1.3 au sud, S1.4 au nord, zone fermée au nord-ouest
-    const float F1WestX1 = F1Scale * 23f, F1S13Z1 = F1Scale * 18f, F1S14Z1 = F1Scale * 33f, F1ClosedX1 = F1Scale * 14.4f;
+    const float F1WestX1 = F1Scale * 23f, F1S13Z1 = F1Scale * 24f, F1S14Z1 = F1Scale * 44f, F1ClosedX1 = F1Scale * 14.4f;
     // Bloc central : S1.5 / S1.2 / toilettes + ascenseur, entre x = F1CenterX0 et x = F1EastX0 (mur de S1.1)
     const float F1CenterX0 = F1Scale * 52f, F1EastX0 = F1Scale * 90f;
-    const float F1ToiletsZ0 = F1Scale * 11.4f, F1S12Z0 = F1Scale * 24.6f, F1S15Z0 = F1Scale * 38.6f;
+    const float F1ToiletsZ0 = F1Scale * 11.4f, F1S12Z0 = F1Scale * 24.6f, F1S15Z0 = F1Scale * 42.4f;
     const float F1ElevatorX0 = F1Scale * 64.8f, F1ElevatorX1 = F1Scale * 71.4f;
-    // Cage d'escalier au sud du couloir, de la taille de l'escalier du rez-de-chaussée ; on arrive par la moitié est
-    const float F1StairsX1 = F1EastX0 - 0.2f, F1StairsWidth = StairsX1 - MinX, F1StairsDepth = StairsZ1 - StairsZ0;
-    const float F1StairsX0 = F1StairsX1 - F1StairsWidth, F1StairsOpenX0 = F1StairsX1 - F1StairsWidth / 2f;
-    // Position de l'étage dans la scène : sa cage d'escalier au-dessus de celle du rez-de-chaussée
-    static readonly Vector3 F1Offset = new Vector3(StairsX1 - F1StairsX1, Floor1Y, StairsZ1);
+    // Cage d'escalier au sud du couloir, au-dessus de l'escalier du rez-de-chaussée (étage tourné de 90° : la largeur
+    // de la cage ici = sa profondeur en bas). On arrive par le palier du haut, à l'extrémité est de la cage, et on
+    // tourne pour entrer dans le couloir par l'ouverture du mur sud de la cage.
+    const float F1StairsX1 = F1EastX0 - 0.2f, F1StairsWidth = StairsZ1 - StairsZ0, F1StairsDepth = StairsX1 - MinX;
+    const float F1StairsX0 = F1StairsX1 - F1StairsWidth;
+    // Position de l'étage dans la scène, tourné de 90° : local x -> monde -z (local F1StairsX1 = monde StairsZ0),
+    // local z -> monde x (local z = 0, côté couloir = monde StairsX1 ; local z = -profondeur = monde MinX)
+    const float F1Yaw = 90f;
+    static readonly Vector3 F1Offset = new Vector3(StairsX1, Floor1Y, StairsZ0 + F1StairsX1);
 
     public static void BuildFloor1()
     {
@@ -47,9 +53,14 @@ public static partial class CampusMapBuilder
         F1Plants();
         F1Ceiling();
 
-        // Construit autour de l'origine, puis posé au-dessus du rez-de-chaussée (les sièges gardent un point en coordonnées monde)
-        root.position = F1Offset;
-        foreach (Seat seat in root.GetComponentsInChildren<Seat>(true)) seat.point += F1Offset;
+        // Construit autour de l'origine, puis tourné et posé au-dessus du rez-de-chaussée (les sièges gardent un point en coordonnées monde)
+        Quaternion rotation = Quaternion.Euler(0f, F1Yaw, 0f);
+        root.SetPositionAndRotation(F1Offset, rotation);
+        foreach (Seat seat in root.GetComponentsInChildren<Seat>(true))
+        {
+            seat.point = F1Offset + rotation * seat.point;
+            seat.yaw += F1Yaw;
+        }
         var level = root.gameObject.AddComponent<FloorLevel>();
         level.level = 1;
         level.baseHeight = Floor1Y;
@@ -61,7 +72,9 @@ public static partial class CampusMapBuilder
     {
         Block("Floor", new Vector3(F1MaxX / 2f, -0.04f, F1MaxZ / 2f), new Vector3(F1MaxX, 0.1f, F1MaxZ), hallFloor);
 
-        WallAlongX("Wall South", 0f, 0f, F1MaxX, ((F1StairsOpenX0 + F1StairsX1) / 2f, F1StairsX1 - F1StairsOpenX0, doorHeight));
+        // Ouverture sur le palier du haut de l'escalier
+        float stairsExitX0 = F1StairsX1 - StairsFlatDepth, stairsExitX1 = F1StairsX1 - WallThickness / 2f;
+        WallAlongX("Wall South", 0f, 0f, F1MaxX, ((stairsExitX0 + stairsExitX1) / 2f, stairsExitX1 - stairsExitX0, doorHeight));
         WallAlongX("Wall North", F1MaxZ, 0f, F1MaxX);
         WallAlongZ("Wall West", 0f, 0f, F1MaxZ);
         WallAlongZ("Wall East", F1MaxX, 0f, F1MaxZ);
@@ -76,7 +89,8 @@ public static partial class CampusMapBuilder
             new Vector3(F1ClosedX1 + WallThickness, 0.1f, F1MaxZ - F1S14Z1 + WallThickness), wall);
 
         // Bloc central
-        const float s12DoorZ = F1Scale * 30.6f, s15DoorZ = F1Scale * 41.3f;
+        // Portes au coin de la salle : le tableau occupe le milieu du mur ouest
+        const float s12DoorZ = F1S12Z0 + 1f, s15DoorZ = F1S15Z0 + 1f;
         WallAlongZ("Wall Center W", F1CenterX0, F1ToiletsZ0, F1MaxZ, DoorGap(s12DoorZ), DoorGap(s15DoorZ));
         WallAlongX("Wall S1.5 S", F1S15Z0, F1CenterX0, F1EastX0);
         WallAlongX("Wall S1.2 S", F1S12Z0, F1CenterX0, F1EastX0);
@@ -94,17 +108,18 @@ public static partial class CampusMapBuilder
 
     static void F1Rooms()
     {
-        F1Classroom("Salle S1.3", 0f, F1WestX1, 0f, F1S13Z1, -90f);
-        F1Classroom("Salle S1.4", 0f, F1WestX1, F1S13Z1, F1S14Z1, -90f);
-        F1Classroom("Salle S1.2", F1CenterX0, F1EastX0, F1S12Z0, F1S15Z0, 90f);
-        F1Classroom("Salle S1.5", F1CenterX0, F1EastX0, F1S15Z0, F1MaxZ, 90f);
-        F1Classroom("Salle S1.1", F1EastX0, F1MaxX, 0f, F1MaxZ, 0f);
+        F1Classroom("Salle S1.3", 0f, F1WestX1, 0f, F1S13Z1, 0f);
+        F1Classroom("Salle S1.4", 0f, F1WestX1, F1S13Z1, F1S14Z1, 180f);
+        F1Classroom("Salle S1.2", F1CenterX0, F1EastX0, F1S12Z0, F1S15Z0, -90f, teacherSide: 1f);
+        F1Classroom("Salle S1.5", F1CenterX0, F1EastX0, F1S15Z0, F1MaxZ, -90f, teacherSide: 1f);
+        F1Classroom("Salle S1.1", F1EastX0, F1MaxX, 0f, F1MaxZ, 180f);
     }
 
     // Salle de cours rectangulaire : tableau (et partage de l'organisateur) sur le mur vers lequel regardent les élèves
-    // (facingYaw : 0 nord, 90 est, 180 sud, -90 ouest), bureau du prof devant, rangées de bureaux collés à partir du tableau
+    // (facingYaw : 0 nord, 90 est, 180 sud, -90 ouest), bureau du prof devant, rangées de bureaux collés à partir du tableau.
+    // teacherSide : 0 bureau du prof au milieu, 1 / -1 dans le coin à droite / à gauche du tableau (vu des élèves)
     static void F1Classroom(string label, float x0, float x1, float z0, float z1, float facingYaw,
-        int maxRows = 4, int maxPerRow = 8)
+        int maxRows = 4, int maxPerRow = 8, float teacherSide = 0f)
     {
         var center = new Vector3((x0 + x1) / 2f, 0f, (z0 + z1) / 2f);
         Block(label + " Floor", center + Vector3.up * -0.035f, new Vector3(x1 - x0, 0.1f, z1 - z0), roomFloor);
@@ -123,7 +138,8 @@ public static partial class CampusMapBuilder
         Sign(label.ToUpperInvariant(), center + forward * (wallOffset - 0.07f) + Vector3.up * 1.45f, 0.22f, new Color(1f, 1f, 1f, 0.85f), facingYaw);
         Display(label + " Board Display", center + forward * (wallOffset - 0.1f) + Vector3.up * 1.45f, facingYaw, boardHeight, true);
 
-        Desk(DeskBlack, center + forward * (halfDepth - 2.2f), facingYaw + 180f, 2);
+        float teacherV = teacherSide * (halfWidth - WallThickness / 2f - deskWidth / 2f - 0.4f);
+        Desk(DeskBlack, center + forward * (halfDepth - 2.2f) + right * teacherV, facingYaw + 180f, 2);
 
         int perRow = Mathf.Clamp(Mathf.FloorToInt((halfWidth * 2f - 2.4f) / deskWidth), 1, maxPerRow);
         for (int row = 0; row < maxRows; row++)
@@ -142,13 +158,13 @@ public static partial class CampusMapBuilder
     // lavabos et miroir le long du mur extérieur
     static void F1Toilets()
     {
-        F1ToiletRoom("WC Ouest", F1CenterX0, F1ElevatorX0, F1Scale * 58.4f, F1CenterX0, 1f);
-        F1ToiletRoom("WC Est", F1ElevatorX1, F1EastX0, F1Scale * 86.4f, F1EastX0, -1f);
+        ToiletRoom("WC Ouest", F1CenterX0, F1ElevatorX0, F1ToiletsZ0, F1S12Z0, F1Scale * 58.4f, F1CenterX0, 1f);
+        ToiletRoom("WC Est", F1ElevatorX1, F1EastX0, F1ToiletsZ0, F1S12Z0, F1Scale * 86.4f, F1EastX0, -1f);
     }
 
-    static void F1ToiletRoom(string name, float x0, float x1, float entranceX, float sinkWallX, float sinkSide)
+    // Toilettes entre x0 et x1, z0 (mur d'entrée, sans porte, côté couloir au sud) et z1
+    static void ToiletRoom(string name, float x0, float x1, float z0, float z1, float entranceX, float sinkWallX, float sinkSide)
     {
-        float z0 = F1ToiletsZ0, z1 = F1S12Z0;
         Block(name + " Floor", new Vector3((x0 + x1) / 2f, -0.035f, (z0 + z1) / 2f), new Vector3(x1 - x0, 0.1f, z1 - z0), tile);
         const float entranceWidth = 2f;
         WallAlongX("Wall " + name + " S", z0, x0, x1, (entranceX, entranceWidth, doorHeight));
@@ -176,26 +192,22 @@ public static partial class CampusMapBuilder
     }
 
     // Cage d'ascenseur fermée entre les deux toilettes, portes métalliques sur le couloir
-    static void F1Elevator()
-    {
-        WallAlongZ("Wall Elevator W", F1ElevatorX0, F1ToiletsZ0, F1S12Z0);
-        WallAlongZ("Wall Elevator E", F1ElevatorX1, F1ToiletsZ0, F1S12Z0);
-        WallAlongX("Wall Elevator S", F1ToiletsZ0, F1ElevatorX0, F1ElevatorX1);
-        Block("Elevator Roof", new Vector3((F1ElevatorX0 + F1ElevatorX1) / 2f, WallHeight + 0.05f, (F1ToiletsZ0 + F1S12Z0) / 2f),
-            new Vector3(F1ElevatorX1 - F1ElevatorX0 + WallThickness, 0.1f, F1S12Z0 - F1ToiletsZ0 + WallThickness), wall);
+    static void F1Elevator() => Elevator(F1ElevatorX0, F1ElevatorX1, F1ToiletsZ0, F1S12Z0, 1, 1, "Étage 1");
 
-        float doorX = (F1ElevatorX0 + F1ElevatorX1) / 2f, faceZ = F1ToiletsZ0 - WallThickness / 2f;
-        const float leafWidth = 0.8f, leafHeight = 2.1f;
-        Block("Elevator Frame", new Vector3(doorX, (leafHeight + 0.1f) / 2f, faceZ - 0.02f), new Vector3(leafWidth * 2f + 0.2f, leafHeight + 0.1f, 0.04f), monitor);
-        foreach (float side in new[] { -1f, 1f })
-            Block("Elevator Door", new Vector3(doorX + side * (leafWidth / 2f + 0.005f), leafHeight / 2f, faceZ - 0.05f),
-                new Vector3(leafWidth - 0.01f, leafHeight, 0.03f), metal);
-        Block("Elevator Button", new Vector3(doorX + leafWidth + 0.35f, 1.1f, faceZ - 0.04f), new Vector3(0.09f, 0.16f, 0.04f), accent);
-        Sign("ASCENSEUR", new Vector3(doorX, (leafHeight + WallHeight) / 2f + 0.05f, faceZ - 0.03f), 0.16f, MenuStyle.Text * 0.95f);
+    // Cage d'ascenseur fermée entre x0 et x1, z0 (portes, côté couloir au sud) et z1
+    static void Elevator(float x0, float x1, float z0, float z1, int level, int number, string label)
+    {
+        WallAlongZ("Wall Elevator W", x0, z0, z1);
+        WallAlongZ("Wall Elevator E", x1, z0, z1);
+        WallAlongX("Wall Elevator S", z0, x0, x1);
+        Block("Elevator Roof", new Vector3((x0 + x1) / 2f, WallHeight + 0.05f, (z0 + z1) / 2f),
+            new Vector3(x1 - x0 + WallThickness, 0.1f, z1 - z0 + WallThickness), wall);
+
+        ElevatorDoors(new Vector3((x0 + x1) / 2f, 0f, z0 - WallThickness / 2f), 180f, level, number, label);
     }
 
-    // Cage d'escalier : vide au-dessus de l'escalier du rez-de-chaussée (qui monte jusqu'ici par la moitié est),
-    // garde-corps le long du vide de la moitié ouest
+    // Cage d'escalier au-dessus de l'escalier du rez-de-chaussée : on arrive sur le palier du haut (côté z > milieu,
+    // au bout x > F1StairsX1 - palier) ; le tronçon vers l'étage 4 part du palier d'en face (construit avec l'étage 4)
     static void F1Stairs()
     {
         float z0 = -F1StairsDepth;
@@ -203,11 +215,8 @@ public static partial class CampusMapBuilder
         WallAlongZ("Wall Stairs E", F1StairsX1, z0, 0f);
         WallAlongX("Wall Stairs S", z0, F1StairsX0, F1StairsX1);
 
-        const float railHeight = 1f, landingDepth = 3f;
-        float railZ0 = z0 + WallThickness / 2f + landingDepth;
-        Block("Stairs Railing", new Vector3(F1StairsOpenX0, railHeight / 2f, railZ0 / 2f), new Vector3(0.06f, railHeight, -railZ0), metal);
-
-        Sign("ESCALIER", new Vector3((F1StairsOpenX0 + F1StairsX1) / 2f, (doorHeight + WallHeight) / 2f, WallThickness / 2f + 0.02f), 0.2f, MenuStyle.Text * 0.95f, 180f);
+        float exitX = F1StairsX1 - (WallThickness / 2f + StairsFlatDepth) / 2f;
+        Sign("ESCALIER", new Vector3(exitX, (doorHeight + WallHeight) / 2f, WallThickness / 2f + 0.02f), 0.2f, MenuStyle.Text * 0.95f, 180f);
     }
 
     static void F1Plants()
@@ -220,7 +229,7 @@ public static partial class CampusMapBuilder
             new Vector3(F1CenterX0 - m, 0f, F1MaxZ - m),
             new Vector3(F1WestX1 + m, 0f, F1ToiletsZ0 - m),
             new Vector3(F1CenterX0 - m, 0f, F1ToiletsZ0 + m),
-            new Vector3(F1StairsOpenX0 - m, 0f, m),
+            new Vector3(F1StairsX0 + m, 0f, m),
         };
         for (int i = 0; i < spots.Length; i++) TallPlant(spots[i], i);
     }
@@ -233,9 +242,9 @@ public static partial class CampusMapBuilder
         const float thickness = 0.05f;
         float y = WallHeight - thickness / 2f;
 
-        foreach (var (x0, x1, z0, z1) in new[] { (0f, F1MaxX, 0f, F1MaxZ), (F1StairsX0, F1StairsX1, -F1StairsDepth, 0f) })
-            Part("Ceiling", PrimitiveType.Cube, new Vector3((x0 + x1) / 2f, y, (z0 + z1) / 2f), Quaternion.identity,
-                new Vector3(x1 - x0, thickness, z1 - z0), ceiling, group);
+        // Pas de plafond au-dessus de la cage d'escalier : l'escalier continue vers l'étage 4
+        Part("Ceiling", PrimitiveType.Cube, new Vector3(F1MaxX / 2f, y, F1MaxZ / 2f), Quaternion.identity,
+            new Vector3(F1MaxX, thickness, F1MaxZ), ceiling, group);
 
         var rooms = new (float x0, float x1, float z0, float z1)[]
         {

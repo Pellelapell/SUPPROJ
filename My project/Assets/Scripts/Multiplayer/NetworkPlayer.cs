@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Netcode;
+using Unity.Netcode.Components;
 using UnityEngine;
 
 // Perso d'un joueur en ligne. Seul le propriétaire lit les touches ; position et animations sont synchronisées
@@ -114,7 +115,7 @@ public class NetworkPlayer : NetworkBehaviour
 
         float dt = Time.deltaTime;
         // Pendant la saisie dans le chat (ou le menu pause), les touches ne déplacent pas le perso
-        bool typing = GameChat.IsTyping || GameHud.MenuOpen;
+        bool typing = GameChat.IsTyping || GameHud.Blocking;
         Vector3 input = typing ? Vector3.zero : ReadMoveInput();
 
         if (!typing && AppRole.IsAdmin && ClassStream.Instance != null)
@@ -161,6 +162,19 @@ public class NetworkPlayer : NetworkBehaviour
         bool wavePressed = !typing && (Input.GetKeyDown(KeyCode.E) || Input.GetKeyDown(KeyCode.Space));
         if (wavePressed && currentSpeed < 0.1f) networkAnimator.SetTrigger(WaveId);
 
+        // Devant un ascenseur : F ouvre le choix de l'étage à la souris (GameHud), un chiffre y va directement
+        ElevatorStop elevator = typing ? null : NearbyElevator();
+        if (elevator != null)
+        {
+            foreach (ElevatorStop stop in ElevatorStop.All)
+                if (stop != elevator && (Input.GetKeyDown(KeyCode.Alpha0 + stop.number) || Input.GetKeyDown(KeyCode.Keypad0 + stop.number)))
+                {
+                    TakeElevator(stop);
+                    return;
+                }
+            if (Input.GetKeyDown(KeyCode.F)) return; // F est pour l'ascenseur, pas pour une porte ou une chaise
+        }
+
         // F : la porte la plus proche (admin), sinon la chaise libre la plus proche
         if (!typing && Input.GetKeyDown(KeyCode.F))
         {
@@ -176,6 +190,26 @@ public class NetworkPlayer : NetworkBehaviour
         AppRole.IsAdmin && DoorNetwork.Instance != null ? SyncedDoor.Nearest(transform.position, doorReach) : null;
 
     public Seat NearbySeat() => Seat.NearestFree(transform.position, seatReach, this);
+
+    public ElevatorStop NearbyElevator() => ElevatorStop.Nearest(transform.position);
+
+    // ---------- Ascenseur ----------
+
+    // On réapparaît devant la porte de l'ascenseur de l'étage choisi (téléportation : pas d'interpolation chez les autres)
+    public void TakeElevator(ElevatorStop destination)
+    {
+        currentSpeed = 0f;
+        if (controller != null) controller.enabled = false;
+        Vector3 position = destination.ArrivalPoint;
+        Quaternion rotation = destination.ArrivalRotation;
+        var networkTransform = GetComponent<NetworkTransform>();
+        if (networkTransform != null && networkTransform.CanCommitToTransform)
+            networkTransform.Teleport(position, rotation, transform.localScale);
+        else
+            transform.SetPositionAndRotation(position, rotation);
+        if (CameraFollow.Instance != null) CameraFollow.Instance.SnapTo(rotation);
+        if (controller != null) controller.enabled = true;
+    }
 
     // ---------- Chaises ----------
 

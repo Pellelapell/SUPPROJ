@@ -53,6 +53,7 @@ public class SyncedDoor : MonoBehaviour
         foreach (SyncedDoor d in all)
         {
             Vector3 p = d.transform.position;
+            if (!FloorLevel.SameHeight(p.y, position.y)) continue; // pas les portes des autres étages
             float distance = Vector2.Distance(new Vector2(p.x, p.z), new Vector2(position.x, position.z));
             if (distance < bestDistance)
             {

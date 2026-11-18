@@ -26,14 +26,12 @@ public static class MultiplayerSetupBuilder
         "city/casual_Female_G",
         "downtown/casual_Male_K",
         "downtown/casual_Female_K",
-        "professions/Doctor_Male_B",
-        "professions/police_Female_A",
     };
 
     // Noms affichés dans le menu (même ordre)
     static readonly string[] CharacterNames =
     {
-        "Hugo", "Léa", "Malik", "Inès", "Docteur Martin", "Agent Durand",
+        "Hugo", "Léa", "Malik", "Inès",
     };
 
     // Palettes pas belles (people_pal_s22 : tout blanc)
@@ -267,6 +265,7 @@ public static class MultiplayerSetupBuilder
         // Bâtiment SUPINFO : rez-de-chaussée (hall, salles, amphi) et parvis, puis l'étage 1 au-dessus, relié par l'escalier
         CampusMapBuilder.Build();
         CampusMapBuilder.BuildFloor1();
+        CampusMapBuilder.BuildFloor4();
 
         // HUD (room, commandes, pseudos, pause) et chat écrit
         new GameObject("Hud").AddComponent<GameHud>();

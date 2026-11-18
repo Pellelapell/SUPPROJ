@@ -12,6 +12,10 @@ using UnityEngine.UI;
 public class GameHud : MonoBehaviour
 {
     public static bool MenuOpen { get; private set; }
+    // Choix de l'étage de l'ascenseur ouvert (curseur libre, perso immobile)
+    public static bool ElevatorOpen { get; private set; }
+    // Une fenêtre du HUD prend la souris et le clavier
+    public static bool Blocking => MenuOpen || ElevatorOpen;
 
     [Tooltip("Au-delà de cette distance, le pseudo n'est plus affiché")]
     public float nameTagDistance = 35f;
@@ -20,6 +24,10 @@ public class GameHud : MonoBehaviour
     Image prompt;
     GameObject promptKey;
     GameObject pauseMenu, playerList;
+    GameObject elevatorPanel;
+    Text elevatorTitle;
+    RectTransform elevatorButtons;
+    ElevatorStop elevatorHere;
     Text playerListTitle;
     RectTransform playerListGrid, tagsRoot;
 
@@ -48,6 +56,7 @@ public class GameHud : MonoBehaviour
     void Start()
     {
         MenuOpen = false;
+        ElevatorOpen = false;
         MenuStyle.EnsureEventSystem();
 
         // Pseudos dans un canvas à part, sous le reste du HUD
@@ -60,15 +69,24 @@ public class GameHud : MonoBehaviour
         BuildClassView(MenuStyle.OverlayCanvas("ClassCanvas", 3));
         if (AppRole.IsAdmin) BuildShareStatus(canvas);
         BuildPauseMenu(MenuStyle.OverlayCanvas("PauseCanvas", 20));
+        BuildElevatorPanel(MenuStyle.OverlayCanvas("ElevatorCanvas", 15));
     }
 
-    void OnDestroy() => MenuOpen = false;
+    void OnDestroy()
+    {
+        MenuOpen = false;
+        ElevatorOpen = false;
+    }
 
     void Update()
     {
         // Échap : ouvre / ferme la pause (sauf si Échap vient d'annuler la saisie du chat)
         if (Input.GetKeyDown(KeyCode.Escape) && !GameChat.IsTyping && GameChat.ClosedFrame != Time.frameCount)
-            SetPause(!MenuOpen);
+        {
+            if (ElevatorOpen) CloseElevator();
+            else SetPause(!MenuOpen);
+        }
+        UpdateElevator();
 
         playerList.SetActive(Input.GetKey(KeyCode.Tab) && !MenuOpen && !GameChat.IsTyping);
 
@@ -102,7 +120,12 @@ public class GameHud : MonoBehaviour
         {
             SyncedDoor door = local.NearbyDoor();
             SyncedDoor lockedDoor = SyncedDoor.Nearest(local.transform.position, local.doorReach);
-            if (door != null)
+            ElevatorStop elevator = local.NearbyElevator();
+            if (ElevatorOpen)
+                text = null;
+            else if (elevator != null && elevator.Next != null)
+                text = "Prendre l'ascenseur  ·  " + elevator.label;
+            else if (door != null)
                 text = $"{(door.IsOpen ? "Fermer" : "Ouvrir")} la porte  ·  {door.label}";
             else if (local.NearbySeat() != null)
                 text = "S'asseoir";
@@ -468,6 +491,73 @@ public class GameHud : MonoBehaviour
                 MenuStyle.TextDim);
 
         pauseMenu.SetActive(false);
+    }
+
+    // ---------- Ascenseur ----------
+
+    void BuildElevatorPanel(Transform canvas)
+    {
+        Image panel = MenuStyle.Box("Elevator", canvas, new Color(0.08f, 0.1f, 0.18f, 0.96f));
+        MenuStyle.Place(panel, new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(420f, 0f));
+        MenuStyle.Column(panel, 12f, new RectOffset(36, 36, 28, 32));
+        panel.gameObject.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+        MenuStyle.Label("Title", panel.transform, "ASCENSEUR", 40, MenuStyle.Text, TextAnchor.MiddleLeft, FontStyle.Bold);
+        elevatorTitle = MenuStyle.Label("Here", panel.transform, "", 20, MenuStyle.TextDim);
+        elevatorButtons = MenuStyle.Rect("Floors", panel.transform);
+        MenuStyle.Column(elevatorButtons, 10f);
+
+        Button close = MenuStyle.Button("Close", panel.transform, "ANNULER", 20,
+            new Color(1f, 1f, 1f, 0.08f), new Color(1f, 1f, 1f, 0.16f), MenuStyle.Text, CloseElevator);
+        MenuStyle.Size(close, 50f);
+
+        elevatorPanel = panel.gameObject;
+        elevatorPanel.SetActive(false);
+    }
+
+    // F devant un ascenseur : ouvre le choix de l'étage ; s'éloigner, Échap ou F le referme
+    void UpdateElevator()
+    {
+        NetworkPlayer local = NetworkPlayer.Local;
+        ElevatorStop near = local != null && local.SeatIndex.Value < 0 ? local.NearbyElevator() : null;
+        if (ElevatorOpen)
+        {
+            if (near != elevatorHere || MenuOpen) CloseElevator();
+            else if (Input.GetKeyDown(KeyCode.F) && !GameChat.IsTyping) CloseElevator();
+            return;
+        }
+        if (near != null && near.Next != null && !MenuOpen && !GameChat.IsTyping && Input.GetKeyDown(KeyCode.F))
+            OpenElevator(near);
+    }
+
+    void OpenElevator(ElevatorStop here)
+    {
+        elevatorHere = here;
+        elevatorTitle.text = "Tu es à : " + here.label;
+        foreach (Transform child in elevatorButtons) Destroy(child.gameObject);
+        foreach (ElevatorStop stop in ElevatorStop.All)
+        {
+            if (stop == here) continue;
+            ElevatorStop destination = stop;
+            Button b = MenuStyle.Button("Floor", elevatorButtons, $"{stop.label.ToUpperInvariant()}   ({stop.number})", 26,
+                MenuStyle.Accent, MenuStyle.AccentHover, Color.white, () => GoTo(destination));
+            MenuStyle.Size(b, 64f);
+        }
+        ElevatorOpen = true;
+        elevatorPanel.SetActive(true);
+    }
+
+    void GoTo(ElevatorStop destination)
+    {
+        CloseElevator();
+        if (NetworkPlayer.Local != null) NetworkPlayer.Local.TakeElevator(destination);
+    }
+
+    void CloseElevator()
+    {
+        ElevatorOpen = false;
+        elevatorHere = null;
+        if (elevatorPanel != null) elevatorPanel.SetActive(false);
     }
 
     void SetPause(bool open)

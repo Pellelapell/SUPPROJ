@@ -1,9 +1,10 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-// Étage du campus (rez-de-chaussée, étage 1) dans la scène de jeu : seul l'étage où se trouve le joueur local est affiché
-// (en vue du dessus, l'étage 1 cacherait le rez-de-chaussée), ainsi que les autres joueurs de cet étage.
-// Les collisions restent actives partout. Les objets sous un AlwaysVisible (l'escalier) restent toujours affichés.
+// Étage du campus (rez-de-chaussée, étages 1 et 4) dans la scène de jeu. En vue du dessus, seul l'étage où se trouve
+// le joueur local est affiché (l'étage du dessus cacherait le sien), ainsi que les autres joueurs de cet étage ;
+// en première personne, tous les étages et tous les joueurs sont affichés (on voit par la cage d'escalier, les vitres…).
+// Les collisions restent actives partout. Les objets sous un AlwaysVisible (escaliers) suivent ses étages à lui.
 // Placé par CampusMapBuilder sur la racine de chaque étage.
 public class FloorLevel : MonoBehaviour
 {
@@ -17,6 +18,13 @@ public class FloorLevel : MonoBehaviour
 
     public static int Current { get; private set; }
 
+    // Première personne (caméra presque aux yeux) : tout est affiché
+    public static bool ShowAll { get; private set; }
+    const float FirstPersonShowAll = 0.8f;
+
+    // Deux altitudes au même étage (chaises, portes, ascenseurs à portée seulement à son étage)
+    public static bool SameHeight(float a, float b) => Mathf.Abs(a - b) < 1.5f;
+
     static readonly List<FloorLevel> all = new List<FloorLevel>();
     static int updatedFrame = -1;
     // Rendus des autres joueurs et leur état affiché, pour ne toucher qu'aux joueurs qui changent d'étage
@@ -24,15 +32,32 @@ public class FloorLevel : MonoBehaviour
         new Dictionary<NetworkPlayer, (Renderer[], bool)>();
     static readonly List<NetworkPlayer> gone = new List<NetworkPlayer>();
 
-    Renderer[] renderers;
-    bool shown = true;
+    // Groupes de rendus affichés ensemble : ceux de l'étage, puis un par AlwaysVisible
+    class RenderGroup
+    {
+        public AlwaysVisible range; // null : rendus de l'étage
+        public readonly List<Renderer> renderers = new List<Renderer>();
+        public bool shown = true;
+    }
+    readonly List<RenderGroup> groups = new List<RenderGroup>();
 
     void Awake()
     {
-        var list = new List<Renderer>();
+        var byRange = new Dictionary<AlwaysVisible, RenderGroup>();
+        var own = new RenderGroup();
+        groups.Add(own);
         foreach (Renderer r in GetComponentsInChildren<Renderer>(true))
-            if (r.GetComponentInParent<AlwaysVisible>() == null) list.Add(r);
-        renderers = list.ToArray();
+        {
+            AlwaysVisible range = r.GetComponentInParent<AlwaysVisible>();
+            if (range == null) { own.renderers.Add(r); continue; }
+            if (!byRange.TryGetValue(range, out RenderGroup g))
+            {
+                g = new RenderGroup { range = range };
+                byRange[range] = g;
+                groups.Add(g);
+            }
+            g.renderers.Add(r);
+        }
     }
 
     void OnEnable() => all.Add(this);
@@ -40,7 +65,7 @@ public class FloorLevel : MonoBehaviour
     void OnDisable()
     {
         all.Remove(this);
-        Show(true);
+        foreach (RenderGroup g in groups) Show(g, true);
     }
 
     void LateUpdate()
@@ -50,9 +75,11 @@ public class FloorLevel : MonoBehaviour
             updatedFrame = Time.frameCount;
             Transform local = CameraFollow.Instance != null ? CameraFollow.Instance.target : null;
             Current = local != null ? LevelAt(local.position.y) : 0;
+            ShowAll = CameraFollow.Instance != null && CameraFollow.Instance.FirstPersonBlend >= FirstPersonShowAll;
             HideOtherPlayers(local);
         }
-        Show(level == Current);
+        foreach (RenderGroup g in groups)
+            Show(g, ShowAll || (g.range == null ? level == Current : g.range.VisibleOn(Current)));
     }
 
     // Étage le plus haut dont le sol est sous (ou juste au-dessus de) cette altitude
@@ -77,7 +104,7 @@ public class FloorLevel : MonoBehaviour
         foreach (NetworkPlayer p in NetworkPlayer.All)
         {
             if (p == null || p.transform == local) continue;
-            bool visible = SameFloor(p.transform);
+            bool visible = ShowAll || SameFloor(p.transform);
             if (players.TryGetValue(p, out var state) && state.visible == visible) continue;
             Renderer[] renderers = state.renderers ?? p.GetComponentsInChildren<Renderer>(true);
             foreach (Renderer r in renderers)
@@ -93,11 +120,11 @@ public class FloorLevel : MonoBehaviour
     }
 
     // forceRenderingOff : indépendant de Renderer.enabled, que d'autres scripts utilisent (plafond, écrans)
-    void Show(bool on)
+    static void Show(RenderGroup g, bool on)
     {
-        if (on == shown) return;
-        shown = on;
-        foreach (Renderer r in renderers)
+        if (on == g.shown) return;
+        g.shown = on;
+        foreach (Renderer r in g.renderers)
             if (r != null) r.forceRenderingOff = !on;
     }
 }

@@ -46,9 +46,18 @@ public class LobbyMenu : MonoBehaviour
     NetworkGameManager GameManager => Network.GetComponent<NetworkGameManager>();
     UnityTransport Transport => Network.GetComponent<UnityTransport>();
 
+    // Perso et tenue tirés au hasard une fois par lancement du jeu (on peut toujours les changer dans le menu)
+    static bool avatarRandomized;
+
     async void Start()
     {
         if (string.IsNullOrEmpty(PlayerProfile.Name)) PlayerProfile.Name = "Joueur" + UnityEngine.Random.Range(100, 1000);
+        if (!avatarRandomized)
+        {
+            avatarRandomized = true;
+            if (ModelCount > 0) PlayerProfile.Model = UnityEngine.Random.Range(0, ModelCount);
+            if (PaletteCount > 0) PlayerProfile.Palette = UnityEngine.Random.Range(0, PaletteCount);
+        }
 
         BuildUI();
         RefreshPreview(false);
