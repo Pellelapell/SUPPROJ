@@ -43,10 +43,10 @@ public static class MultiplayerSetupBuilder
     public static void Build()
     {
         if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
-        if (!AnimationTestSceneBuilder.PrepareMixamo()) return;
+        if (!CharacterSetup.PrepareMixamo()) return;
 
-        AnimationTestSceneBuilder.EnsureFolder(NetDir);
-        AnimatorController controller = AnimationTestSceneBuilder.CreatePlayerController(ControllerPath);
+        CharacterSetup.EnsureFolder(NetDir);
+        AnimatorController controller = CharacterSetup.CreatePlayerController(ControllerPath);
 
         GameObject[] prefabs = Characters.Select(c => CreatePlayerPrefab(c, controller)).ToArray();
         GameObject doorNetwork = CreateDoorNetworkPrefab();
@@ -65,7 +65,7 @@ public static class MultiplayerSetupBuilder
 
     static GameObject CreatePlayerPrefab(string character, AnimatorController controller)
     {
-        string sourcePath = AnimationTestSceneBuilder.CityPrefabs + character + ".prefab";
+        string sourcePath = CharacterSetup.CityPrefabs + character + ".prefab";
         var source = AssetDatabase.LoadAssetAtPath<GameObject>(sourcePath);
         if (source == null) throw new System.IO.FileNotFoundException("Prefab introuvable : " + sourcePath);
 
@@ -85,8 +85,8 @@ public static class MultiplayerSetupBuilder
         netTransform.SyncScaleX = netTransform.SyncScaleY = netTransform.SyncScaleZ = false;
         animator.gameObject.AddComponent<OwnerNetworkAnimator>().Animator = animator;
         var player = go.AddComponent<NetworkPlayer>();
-        player.walkSpeed = AnimationTestSceneBuilder.WalkSpeed;
-        player.runSpeed = AnimationTestSceneBuilder.RunSpeed;
+        player.walkSpeed = CharacterSetup.WalkSpeed;
+        player.runSpeed = CharacterSetup.RunSpeed;
 
         // Collisions avec les murs, meubles et portes fermées
         var body = go.AddComponent<CharacterController>();
@@ -134,7 +134,7 @@ public static class MultiplayerSetupBuilder
     // people_pal, people_pal_s1, ..., people_pal_s23 (ordre numérique)
     static Material[] LoadPalettes()
     {
-        return AssetDatabase.FindAssets("people_pal t:Material", new[] { AnimationTestSceneBuilder.CityDir + "/Materials" })
+        return AssetDatabase.FindAssets("people_pal t:Material", new[] { CharacterSetup.CityDir + "/Materials" })
             .Select(AssetDatabase.GUIDToAssetPath)
             .Select(AssetDatabase.LoadAssetAtPath<Material>)
             .Where(m => m != null && m.name.StartsWith("people_pal"))
@@ -180,7 +180,7 @@ public static class MultiplayerSetupBuilder
         var menu = new GameObject("LobbyMenu").AddComponent<LobbyMenu>();
         menu.previewSpot = previewSpot;
         menu.avatarPreviewPrefabs = Characters
-            .Select(c => AssetDatabase.LoadAssetAtPath<GameObject>(AnimationTestSceneBuilder.CityPrefabs + c + ".prefab"))
+            .Select(c => AssetDatabase.LoadAssetAtPath<GameObject>(CharacterSetup.CityPrefabs + c + ".prefab"))
             .ToArray();
         menu.avatarNames = CharacterNames;
         menu.previewController = controller;
@@ -191,7 +191,7 @@ public static class MultiplayerSetupBuilder
     // Socle sous l'aperçu du perso (disque sombre + anneau lumineux) et éclairage de vitrine
     static void CreatePreviewStage()
     {
-        AnimationTestSceneBuilder.EnsureFolder(MenuMaterialsDir);
+        CharacterSetup.EnsureFolder(MenuMaterialsDir);
         Material disc = MenuMaterial("MenuPlatform", new Color32(0x1E, 0x18, 0x36, 0xFF), Color.black, 0.85f);
         Material ring = MenuMaterial("MenuRing", MenuStyle.Accent, MenuStyle.Accent * 2.2f, 0.5f);
 
@@ -257,15 +257,16 @@ public static class MultiplayerSetupBuilder
         var ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
         ground.name = "Ground";
         ground.transform.localScale = new Vector3(20f, 1f, 20f); // 200 m : le campus et la rue tiennent dessus
-        ground.GetComponent<MeshRenderer>().sharedMaterial = AnimationTestSceneBuilder.GroundMaterial();
+        ground.GetComponent<MeshRenderer>().sharedMaterial = CharacterSetup.GroundMaterial();
 
         // Même cadrage que CameraFollow une fois le perso apparu
         var cam = Camera.main;
         cam.transform.position = new Vector3(0f, 9f, -6.5f);
         cam.transform.LookAt(new Vector3(0f, 1.2f, 0f));
 
-        // Bâtiment SUPINFO (hall, salles, amphi) et parvis
+        // Bâtiment SUPINFO : rez-de-chaussée (hall, salles, amphi) et parvis, puis l'étage 1 au-dessus, relié par l'escalier
         CampusMapBuilder.Build();
+        CampusMapBuilder.BuildFloor1();
 
         // HUD (room, commandes, pseudos, pause) et chat écrit
         new GameObject("Hud").AddComponent<GameHud>();

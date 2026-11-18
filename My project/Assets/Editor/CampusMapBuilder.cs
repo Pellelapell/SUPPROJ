@@ -25,7 +25,7 @@ using UnityEngine;
 // seul l'admin peut les ouvrir. Chaque chaise de bureau est un siège (Seat). Les bureaux des élèves ont un écran de PC,
 // et les tableaux / le grand écran de l'amphi un écran (ScreenDisplay) : tous affichent le partage de l'organisateur.
 // Appelé par Tools > Multijoueur > Créer le menu et la scène de jeu.
-public static class CampusMapBuilder
+public static partial class CampusMapBuilder
 {
     const string MaterialsDir = "Assets/Materials/Map";
     const string ThirdParty = "Assets/ThirdParty/";
@@ -46,8 +46,9 @@ public static class CampusMapBuilder
     const float ChairYaw = 0f;    // chaise tournée vers son bureau
     const float ChairGap = 0.35f; // espace entre le bord du bureau et la chaise
 
-    const float WallHeight = 2.6f;
+    const float WallHeight = 3.2f; // hauteur des murs = hauteur du plafond
     const float WallThickness = 0.2f;
+    const float Floor1Y = WallHeight + 0.2f; // altitude du sol de l'étage 1 (dalle de 20 cm sur les murs du rez-de-chaussée)
 
     // ---------- Plan de l'étage 0 ----------
     const float Scale = 2f; // mètres par unité plan
@@ -81,18 +82,14 @@ public static class CampusMapBuilder
     const float AmphiRowSpacing = 2.6f, AmphiSeatSpacing = 2.1f, AmphiAisle = 2.4f;
 
     static Transform root;
-    static Material wall, hallFloor, roomFloor, board, screen, stage, accent, monitor, display, tile, sanitary, road, sidewalk, marking, ceiling, ceilingLight, wood, fabric, doorBlue, metal, appliance, signText;
+    static string wallGroup = "Building";
+    static Material wall, hallFloor, roomFloor, board, screen, stage, accent, monitor, display, tile, sanitary, road, sidewalk, marking, ceiling, ceilingLight, wood, fabric, doorBlue, metal, appliance, signText, leaves, pot, glass;
     static float doorWidth, doorHeight, deskWidth, deskDepth;
     static int doorCount, seatCount;
 
     public static void Build()
     {
-        root = new GameObject("Campus").transform;
-        doorCount = 0;
-        seatCount = 0;
-        CreateMaterials();
-        MeasureDoor();
-        MeasureDesk();
+        Begin("Campus");
 
         BuildShell();
         BuildHall();
@@ -105,8 +102,34 @@ public static class CampusMapBuilder
         BuildOffice();
         BuildClassroom("Salle S.03", OfficeX1, MaxX);
         BuildStreet();
+        BuildPlants();
         BuildCeiling();
 
+        var level = root.gameObject.AddComponent<FloorLevel>();
+        level.level = 0;
+        level.baseHeight = 0f;
+        Finish();
+    }
+
+    // Début de construction d'un étage : racine, matériaux, mesures des portes et des bureaux.
+    // firstFloor = false : les portes et sièges continuent la numérotation de l'étage précédent (même scène, même réseau)
+    static void Begin(string rootName, bool firstFloor = true)
+    {
+        root = new GameObject(rootName).transform;
+        wallGroup = "Building";
+        if (firstFloor)
+        {
+            doorCount = 0;
+            seatCount = 0;
+        }
+        CreateMaterials();
+        MeasureDoor();
+        MeasureDesk();
+    }
+
+    // Fin de construction : matériau des écritures, pas d'ombres, lumière ambiante
+    static void Finish()
+    {
         // La texture de la police peut changer en jeu : le matériau des écritures la suit
         var signs = Group("Signs").gameObject.AddComponent<SignText>();
         signs.material = signText;
@@ -122,6 +145,16 @@ public static class CampusMapBuilder
             r.receiveShadows = false;
         }
 
+        // Décor immobile regroupé en gros maillages (static batching) : beaucoup moins d'appels de rendu.
+        // Pas les portes (elles bougent), les écrans (images changées en jeu) ni les écritures (TextMesh)
+        Transform doors = Group("Doors");
+        foreach (Renderer r in root.GetComponentsInChildren<Renderer>(true))
+        {
+            if (r.transform.IsChildOf(doors) || r.GetComponentInParent<ScreenDisplay>() != null || r.GetComponent<TextMesh>() != null)
+                continue;
+            GameObjectUtility.SetStaticEditorFlags(r.gameObject, StaticEditorFlags.BatchingStatic);
+        }
+
         // Lumière ambiante forte et venant de partout : les faces des murs à contre-jour restent claires (pas de murs noirs)
         RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Trilight;
         RenderSettings.ambientSkyColor = new Color(0.82f, 0.84f, 0.88f);
@@ -132,6 +165,28 @@ public static class CampusMapBuilder
     // ---------- Murs, sols, portes ----------
 
     static (float, float, float) DoorGap(float center) => (center, doorWidth, doorHeight);
+
+    // Vitres : ouverture entre l'allège et le haut de la fenêtre, avec un vitrage transparent (qui bloque le passage)
+    const float WindowWidth = 2.4f, WindowSill = 0.35f, WindowTop = WallHeight - 0.3f;
+
+    // Centres des vitres d'une salle entre x0 et x1 sur son mur de couloir, de part et d'autre de sa porte
+    static float[] WindowsAround(float x0, float x1, float doorX)
+    {
+        const float wallMargin = 0.8f, doorMargin = 1.3f, spacing = WindowWidth + 0.8f;
+        var centers = new System.Collections.Generic.List<float>();
+        foreach (var (a, b) in new[] { (x0 + wallMargin, doorX - doorMargin), (doorX + doorMargin, x1 - wallMargin) })
+            if (b - a >= WindowWidth)
+                centers.AddRange(Spread(a + WindowWidth / 2f, b - WindowWidth / 2f, spacing));
+        return centers.ToArray();
+    }
+
+    // Allège + vitrage dans une ouverture de mur le long de X (le linteau est fait par WallAlongX)
+    static void Window(float x, float z)
+    {
+        Block("Window Sill", new Vector3(x, WindowSill / 2f, z), new Vector3(WindowWidth, WindowSill, WallThickness), wall);
+        Block("Window Frame", new Vector3(x, WindowSill + 0.02f, z), new Vector3(WindowWidth, 0.04f, WallThickness + 0.06f), monitor);
+        Block("Window Glass", new Vector3(x, (WindowSill + WindowTop) / 2f, z), new Vector3(WindowWidth, WindowTop - WindowSill, 0.03f), glass);
+    }
     static (float, float, float) Opening(float center, float width) => (center, width, WallHeight);
 
     static void BuildShell()
@@ -147,7 +202,13 @@ public static class CampusMapBuilder
         // Rangée du fond : stockage (fermé), puis (après le coin des distributeurs) S.01, bureau, S.03
         WallAlongX("Wall Storage", BackRowZ, MinX, StorageX1); // stockage fermé (BuildStorage)
         WallAlongZ("Wall Storage E", StorageX1, BackRowZ, BackZ);
-        WallAlongX("Wall Rooms", BackRowZ, S01X0, MaxX, DoorGap(S01DoorX), DoorGap(OfficeDoorX), DoorGap(S03DoorX));
+        // Mur des salles du fond sur le couloir : portes + grandes vitres (on voit dans S.01, le bureau et S.03)
+        var roomWindows = new[] { (S01X0, S01X1, S01DoorX), (S01X1, OfficeX1, OfficeDoorX), (OfficeX1, MaxX, S03DoorX) }
+            .SelectMany(r => WindowsAround(r.Item1, r.Item2, r.Item3)).ToArray();
+        WallAlongX("Wall Rooms", BackRowZ, S01X0, MaxX,
+            new[] { DoorGap(S01DoorX), DoorGap(OfficeDoorX), DoorGap(S03DoorX) }
+                .Concat(roomWindows.Select(x => (x, WindowWidth, WindowTop))).ToArray());
+        foreach (float x in roomWindows) Window(x, BackRowZ);
         WallAlongZ("Wall S.01 W", S01X0, BackRowZ, BackZ);
         WallAlongZ("Wall S.01 E", S01X1, BackRowZ, BackZ);
         WallAlongZ("Wall S.03 W", OfficeX1, BackRowZ, BackZ);
@@ -178,7 +239,7 @@ public static class CampusMapBuilder
             WallSegment(name, new Vector3((x + left) / 2f, 0f, z), new Vector3(left - x, WallHeight, WallThickness));
             if (gap.height < WallHeight)
                 Block(name + " Lintel", new Vector3(gap.center, (gap.height + WallHeight) / 2f, z),
-                    new Vector3(gap.width, WallHeight - gap.height, WallThickness), wall);
+                    new Vector3(gap.width, WallHeight - gap.height, WallThickness), wall, wallGroup);
             x = right;
         }
         WallSegment(name, new Vector3((x + x1) / 2f, 0f, z), new Vector3(x1 - x, WallHeight, WallThickness));
@@ -194,7 +255,7 @@ public static class CampusMapBuilder
             WallSegment(name, new Vector3(x, 0f, (z + low) / 2f), new Vector3(WallThickness, WallHeight, low - z));
             if (gap.height < WallHeight)
                 Block(name + " Lintel", new Vector3(x, (gap.height + WallHeight) / 2f, gap.center),
-                    new Vector3(WallThickness, WallHeight - gap.height, gap.width), wall);
+                    new Vector3(WallThickness, WallHeight - gap.height, gap.width), wall, wallGroup);
             z = high;
         }
         WallSegment(name, new Vector3(x, 0f, (z + z1) / 2f), new Vector3(WallThickness, WallHeight, z1 - z));
@@ -203,7 +264,7 @@ public static class CampusMapBuilder
     static void WallSegment(string name, Vector3 bottomCenter, Vector3 size)
     {
         if (size.x <= 0.01f || size.z <= 0.01f) return;
-        Block(name, bottomCenter + Vector3.up * size.y / 2f, size, wall);
+        Block(name, bottomCenter + Vector3.up * size.y / 2f, size, wall, wallGroup);
     }
 
     // Taille du cadre de porte, pour découper les murs à la bonne largeur
@@ -285,7 +346,7 @@ public static class CampusMapBuilder
         // Banc pouf en U dans le hall, à droite (près du mur de l'amphi) : les deux bras collés au mur de façade,
         // le fond du U côté intérieur (ouvert vers la façade)
         const float poufHeight = 0.45f, poufDepth = 0.8f, poufLength = 6f, poufArm = 2.4f;
-        float poufX1 = AmphiX0 - WallThickness / 2f - 1.5f, poufX0 = poufX1 - poufLength;
+        float poufX1 = AmphiX0 - WallThickness / 2f - 4.5f, poufX0 = poufX1 - poufLength;
         float poufZ0 = FrontZ + WallThickness / 2f;
         foreach (float x in new[] { poufX0 + poufDepth / 2f, poufX1 - poufDepth / 2f })
             Block("Pouf", new Vector3(x, poufHeight / 2f, poufZ0 + poufArm / 2f), new Vector3(poufDepth, poufHeight, poufArm), fabric, "Hall");
@@ -293,41 +354,45 @@ public static class CampusMapBuilder
 
     }
 
-    // Escalier vers l'étage 1 en deux volées côte à côte avec un demi-tour (180°) sur un palier au fond :
-    // on monte vers le nord par la moitié gauche, on fait demi-tour sur le palier, puis on monte vers le sud par la moitié droite.
-    // Fermé par une barrière en bas tant que l'étage 1 n'existe pas.
+    // Escalier vers l'étage 1 en deux volées côte à côte avec un demi-tour (180°) sur un palier au fond (sud) :
+    // on entre par le nord (salle de pause) dans la moitié gauche, on monte vers le sud, demi-tour sur le palier,
+    // puis on monte vers le nord par la moitié droite et on arrive dans le couloir de l'étage 1.
+    // Toujours affiché (AlwaysVisible), quel que soit l'étage où l'on est.
     static void BuildStairs()
     {
+        Transform group = Group("Stairs");
+        group.gameObject.AddComponent<AlwaysVisible>();
+        wallGroup = "Stairs";
         WallAlongZ("Wall Stairs E", StairsX1, StairsZ0, StairsZ1);
-        WallAlongX("Wall Stairs N", StairsZ1, MinX, StairsX1);
+        WallAlongX("Wall Stairs S", StairsZ0, MinX, StairsX1);
 
         const int stepsPerFlight = 8;
         const float landingDepth = 3f;
-        float rise = WallHeight / (2 * stepsPerFlight + 1); // palier = une marche entre les deux volées
+        float rise = Floor1Y / (2 * stepsPerFlight + 1); // palier = une marche entre les deux volées
         float x0 = MinX + WallThickness / 2f, x1 = StairsX1 - WallThickness / 2f, xMid = (x0 + x1) / 2f;
-        float landingZ0 = StairsZ1 - WallThickness / 2f - landingDepth;
-        float run = (landingZ0 - StairsZ0) / stepsPerFlight;
+        float landingZ0 = StairsZ0 + WallThickness / 2f, landingZ1 = landingZ0 + landingDepth;
+        float run = (StairsZ1 - landingZ1) / stepsPerFlight;
         float leftX0 = x0, leftX1 = xMid - WallThickness / 2f, rightX0 = xMid + WallThickness / 2f, rightX1 = x1;
 
         for (int i = 0; i < stepsPerFlight; i++)
         {
-            float topUp = rise * (i + 1);                       // volée 1 : vers le nord
-            Block("Step A" + (i + 1), new Vector3((leftX0 + leftX1) / 2f, topUp / 2f, StairsZ0 + run * (i + 0.5f)),
-                new Vector3(leftX1 - leftX0, topUp, run), wood);
-            float topBack = rise * (stepsPerFlight + 2 + i);    // volée 2 : vers le sud, après le palier
-            Block("Step B" + (i + 1), new Vector3((rightX0 + rightX1) / 2f, topBack / 2f, landingZ0 - run * (i + 0.5f)),
-                new Vector3(rightX1 - rightX0, topBack, run), wood);
+            float topDown = rise * (i + 1);                     // volée 1 : vers le sud, depuis l'entrée
+            Block("Step A" + (i + 1), new Vector3((leftX0 + leftX1) / 2f, topDown / 2f, StairsZ1 - run * (i + 0.5f)),
+                new Vector3(leftX1 - leftX0, topDown, run), wood, "Stairs");
+            float topBack = rise * (stepsPerFlight + 2 + i);    // volée 2 : vers le nord, après le palier
+            Block("Step B" + (i + 1), new Vector3((rightX0 + rightX1) / 2f, topBack / 2f, landingZ1 + run * (i + 0.5f)),
+                new Vector3(rightX1 - rightX0, topBack, run), wood, "Stairs");
         }
         float landingTop = rise * (stepsPerFlight + 1);
-        Block("Landing", new Vector3((x0 + x1) / 2f, landingTop / 2f, (landingZ0 + StairsZ1 - WallThickness / 2f) / 2f),
-            new Vector3(x1 - x0, landingTop, landingDepth), wood);
+        Block("Landing", new Vector3((x0 + x1) / 2f, landingTop / 2f, (landingZ0 + landingZ1) / 2f),
+            new Vector3(x1 - x0, landingTop, landingDepth), wood, "Stairs");
 
-        // Mur entre les deux volées, jusqu'au palier
-        WallAlongZ("Wall Stairs Mid", xMid, StairsZ0, landingZ0);
+        // Mur entre les deux volées, depuis le palier jusqu'à l'entrée
+        WallAlongZ("Wall Stairs Mid", xMid, landingZ1, StairsZ1);
+        wallGroup = "Building";
 
-        float barrierX = (leftX0 + leftX1) / 2f;
-        Block("Stairs Barrier", new Vector3(barrierX, 0.5f, StairsZ0 - 0.3f), new Vector3(leftX1 - leftX0, 1f, 0.08f), accent);
-        Sign("ÉTAGE 1", new Vector3(barrierX, 0.6f, StairsZ0 - 0.36f), 0.2f, Color.white);
+        // Panneau à l'entrée, sur la face nord de la volée qui monte
+        Sign("ESCALIER ÉTAGE 1", new Vector3((rightX0 + rightX1) / 2f, 1.6f, StairsZ1 + 0.02f), 0.2f, MenuStyle.Text * 0.95f, 180f);
     }
 
     // Toilettes : entrée sans porte côté hall (mur ouest), surmontée d'un linteau avec le nom, lavabos au nord, cabines le long du mur côté amphi
@@ -402,20 +467,44 @@ public static class CampusMapBuilder
         // Grand écran : aussi large que possible, sous le haut du mur
         float wallX = MaxX - WallThickness / 2f;
         float screenWidth = Mathf.Min(12f, (AmphiZ1 - FrontZ) * 0.6f);
-        Block("Screen", new Vector3(wallX - 0.03f, 1.55f, centerZ), new Vector3(0.05f, 1.9f, screenWidth), screen);
-        Sign("SUPINFO", new Vector3(wallX - 0.07f, 1.75f, centerZ), 0.5f, Color.white, 90f);
-        Sign("AMPHITHÉÂTRE", new Vector3(wallX - 0.07f, 1.2f, centerZ), 0.2f, new Color(1f, 1f, 1f, 0.8f), 90f);
-        Display("Screen Display", new Vector3(wallX - 0.1f, 1.55f, centerZ), 90f, 1.7f, true);
+        const float screenY = 1.9f; // assez haut pour être vu du fond de la salle
+        Block("Screen", new Vector3(wallX - 0.03f, screenY, centerZ), new Vector3(0.05f, 1.9f, screenWidth), screen);
+        Sign("SUPINFO", new Vector3(wallX - 0.07f, screenY + 0.2f, centerZ), 0.5f, Color.white, 90f);
+        Sign("AMPHITHÉÂTRE", new Vector3(wallX - 0.07f, screenY - 0.35f, centerZ), 0.2f, new Color(1f, 1f, 1f, 0.8f), 90f);
+        Display("Screen Display", new Vector3(wallX - 0.1f, screenY, centerZ), 90f, 1.7f, true);
 
         Desk(DeskBlack, new Vector3(MaxX - StageDepth / 2f, 0.25f, centerZ), -90f, 1);
 
-        // Rangées entre le couloir d'entrée (côté ouest) et l'estrade ; places de part et d'autre de l'allée centrale
-        float[] rowsX = Spread(AmphiX0 + 5f, MaxX - StageDepth - 2f, AmphiRowSpacing);
-        float[] seatsZ = Spread(FrontZ + 1.3f, centerZ - AmphiAisle / 2f, AmphiSeatSpacing)
-            .Concat(Spread(centerZ + AmphiAisle / 2f, AmphiZ1 - 1.3f, AmphiSeatSpacing)).ToArray();
-        for (int row = 0; row < rowsX.Length; row++)
-            foreach (float z in seatsZ)
-                Desk(DeskWhite, new Vector3(rowsX[row], 0f, z), 90f, row, true);
+        // Bureaux en demi-cercles autour de l'estrade, comme un théâtre romain (sol plat) : arcs de plus en plus grands
+        // centrés sur le bord de l'estrade, chaque bureau tourné vers le centre, allée dans l'axe de l'estrade.
+        var center = new Vector2(MaxX - StageDepth, centerZ);
+        // 5 arcs : le premier à 7,6 m de l'estrade, le dernier à 18 m (couloir libre devant les entrées)
+        const float firstRadius = 7.6f, maxAngle = 80f, deskMargin = 1.1f; // deskMargin : place de la chaise derrière
+        const int arcs = 5;
+        float halfWidth = (AmphiZ1 - FrontZ) / 2f - WallThickness / 2f - 1.2f;
+        for (int arc = 0; arc < arcs; arc++)
+        {
+            float radius = firstRadius + arc * AmphiRowSpacing;
+            float step = AmphiSeatSpacing / radius * Mathf.Rad2Deg;
+            int perSide = Mathf.FloorToInt(maxAngle / step);
+            var seats = new System.Collections.Generic.List<(int i, Vector3 position, float yaw)>();
+            for (int i = -perSide; i <= perSide; i++)
+            {
+                float angle = i * step * Mathf.Deg2Rad;
+                var position = new Vector3(center.x - radius * Mathf.Cos(angle), 0f, center.y + radius * Mathf.Sin(angle));
+                float offset = position.z - center.y;
+                if (Mathf.Abs(offset) < AmphiAisle / 2f + 0.5f) continue;                       // allée centrale
+                if (Mathf.Abs(offset) + deskMargin * Mathf.Abs(Mathf.Sin(angle)) > halfWidth) continue; // trop près des murs
+                Vector3 toCenter = new Vector3(center.x, 0f, center.y) - position;
+                seats.Add((i, position, Mathf.Atan2(toCenter.x, toCenter.z) * Mathf.Rad2Deg));
+            }
+            // Pas de bureau au bout de chaque arc (trop serré contre les murs nord et sud)
+            int lastLeft = seats.Where(s => s.i < 0).Select(s => s.i).DefaultIfEmpty(0).Min();
+            int lastRight = seats.Where(s => s.i > 0).Select(s => s.i).DefaultIfEmpty(0).Max();
+            foreach (var seat in seats)
+                if (seat.i != lastLeft && seat.i != lastRight)
+                    Desk(DeskWhite, seat.position, seat.yaw, arc + seat.i, true);
+        }
     }
 
     // Salle de pause : espace ouvert (passage libre) entre l'escalier / les toilettes et la rangée de salles du fond.
@@ -596,6 +685,61 @@ public static class CampusMapBuilder
         Place(Props + "building_block_D.prefab", new Vector3(MinX - 10f, 0f, (FrontZ + BackZ) / 2f), 90f, "Street");
     }
 
+    // Grandes plantes en pot dans les coins libres du hall, des couloirs, de la salle de pause, du bureau et de l'amphi
+    static void BuildPlants()
+    {
+        const float m = 0.7f; // distance aux murs
+        Vector3[] spots =
+        {
+            // Hall : devant le comptoir côté mur ouest, de part et d'autre du banc, coin de l'amphi, devant les toilettes
+            new Vector3(MinX + m, 0f, Scale * 11.4f - 1.5f),
+            new Vector3(AmphiX0 - 3.8f, 0f, FrontZ + m),
+            new Vector3(AmphiX0 - 4.5f - 6f - 0.9f, 0f, FrontZ + m),
+            new Vector3(AmphiX0 - m, 0f, FrontZ + m),
+            new Vector3(ToiletsX0 - m, 0f, ToiletsZ0 - m),
+            // Couloir entre l'escalier et les toilettes
+            new Vector3(StairsX1 + m, 0f, StairsZ0 + m),
+            // Salle de pause
+            new Vector3(StairsX1 + m, 0f, StairsZ1 + m + 0.5f),
+            new Vector3(MaxX - m, 0f, AmphiZ1 + m),
+            new Vector3(MaxX - m, 0f, BackRowZ - m),
+            new Vector3((AmphiTopDoorX + MaxX) / 2f, 0f, AmphiZ1 + m),
+            // Bureau
+            new Vector3(OfficeX1 - m, 0f, BackRowZ + m),
+            new Vector3(S01X1 + m, 0f, BackZ - m),
+            // Amphithéâtre, côté entrées
+            new Vector3(AmphiX0 + m, 0f, FrontZ + m),
+            new Vector3(AmphiX0 + m, 0f, AmphiZ1 - m),
+        };
+        for (int i = 0; i < spots.Length; i++) TallPlant(spots[i], i);
+    }
+
+    // Plante haute (~1,9 m) : pot avec collision, tronc et feuillage en boules (sans collision)
+    static void TallPlant(Vector3 position, int variant)
+    {
+        Transform group = Group("Plants");
+        var potGo = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+        potGo.name = "Plant Pot";
+        potGo.transform.SetParent(group, false);
+        potGo.transform.position = position + Vector3.up * 0.25f;
+        potGo.transform.localScale = new Vector3(0.5f, 0.25f, 0.5f); // cylindre Unity : 2 m de haut
+        potGo.GetComponent<MeshRenderer>().sharedMaterial = pot;
+        potGo.isStatic = true;
+
+        Part("Plant Trunk", PrimitiveType.Cylinder, position + Vector3.up * 0.85f, Quaternion.identity, new Vector3(0.06f, 0.4f, 0.06f), monitor, group);
+        float turn = variant * 47f;
+        (Vector3 offset, float size)[] blobs =
+        {
+            (new Vector3(0f, 1.55f, 0f), 0.75f),
+            (new Vector3(0.18f, 1.3f, 0.05f), 0.55f),
+            (new Vector3(-0.15f, 1.35f, -0.1f), 0.5f),
+            (new Vector3(0.02f, 1.85f, 0.08f), 0.45f),
+        };
+        foreach (var (offset, size) in blobs)
+            Part("Plant Leaves", PrimitiveType.Sphere, position + Quaternion.Euler(0f, turn, 0f) * offset, Quaternion.identity,
+                new Vector3(size, size * 1.1f, size), leaves, group);
+    }
+
     // Plafond + dalles lumineuses, visibles seulement en première personne (FirstPersonOnly) : en vue du dessus
     // on voit toujours l'intérieur. Pas de lampes temps réel (trop de lumières sur les grands sols, ça scintille) :
     // le plafond ne projette pas d'ombre, l'intérieur reste éclairé par le soleil et la lumière ambiante.
@@ -647,7 +791,7 @@ public static class CampusMapBuilder
         foreach (Renderer r in group.GetComponentsInChildren<Renderer>()) r.enabled = false;
     }
 
-    // ---------- Mobilier ----------    // ---------- Mobilier ----------
+    // ---------- Mobilier ----------
 
     // Bureau + chaise (siège). yaw = direction vers laquelle regarde la personne assise ; la chaise est placée derrière.
     // withMonitor : écran de PC sur le bureau, tourné vers la chaise.
@@ -655,9 +799,13 @@ public static class CampusMapBuilder
     {
         GameObject desk = Place(deskPath, position, yaw + DeskYaw, "Furniture");
         Bounds bounds = WorldBounds(desk);
+        // Profondeur du bureau : lue sur ses limites s'il est aligné sur les axes, sinon (bureau en biais, amphi)
+        // celle mesurée sur le modèle
         float depth = bounds.size.z;
-        if (Mathf.Abs(Mathf.DeltaAngle(yaw, 90f)) < 45f || Mathf.Abs(Mathf.DeltaAngle(yaw, -90f)) < 45f)
+        if (Mathf.Abs(Mathf.DeltaAngle(yaw, 90f)) < 1f || Mathf.Abs(Mathf.DeltaAngle(yaw, -90f)) < 1f)
             depth = bounds.size.x;
+        else if (Mathf.Abs(Mathf.DeltaAngle(yaw, 0f)) > 1f && Mathf.Abs(Mathf.DeltaAngle(yaw, 180f)) > 1f)
+            depth = deskDepth;
 
         Quaternion rotation = Quaternion.Euler(0f, yaw, 0f);
         Vector3 chairPosition = position + rotation * Vector3.back * (depth / 2f + ChairGap);
@@ -798,8 +946,8 @@ public static class CampusMapBuilder
 
     static void CreateMaterials()
     {
-        AnimationTestSceneBuilder.EnsureFolder(MaterialsDir);
-        AnimationTestSceneBuilder.EnsureFolder(TexturesDir);
+        CharacterSetup.EnsureFolder(MaterialsDir);
+        CharacterSetup.EnsureFolder(TexturesDir);
         Texture2D plaster = PatternTexture("Plaster", Plaster), tiles = PatternTexture("Tiles", Tiles),
             carpet = PatternTexture("Carpet", Carpet),
             weave = PatternTexture("Fabric", Weave), asphalt = PatternTexture("Asphalt", Asphalt);
@@ -826,6 +974,9 @@ public static class CampusMapBuilder
         ceilingLight = MapMaterial("CeilingLight", new Color32(0xFF, 0xFB, 0xF0, 0xFF), new Color(1.1f, 1.08f, 1.02f), 0.5f);
         display = DisplayMaterial();
         signText = SignMaterial();
+        leaves = MapMaterial("Leaves", new Color32(0x3B, 0x8A, 0x3E, 0xFF), Color.black, 0.25f);
+        pot = MapMaterial("Pot", new Color32(0x2B, 0x2E, 0x35, 0xFF), Color.black, 0.4f);
+        glass = GlassMaterial();
     }
 
     // ---------- Textures générées (motifs en niveaux de gris, teintés par la couleur du matériau, raccordables) ----------
@@ -960,6 +1111,31 @@ public static class CampusMapBuilder
         return mat;
     }
 
+    // Vitrage : Standard en mode transparent, légèrement teinté
+    static Material GlassMaterial()
+    {
+        string path = MaterialsDir + "/Glass.mat";
+        var mat = AssetDatabase.LoadAssetAtPath<Material>(path);
+        if (mat == null)
+        {
+            mat = new Material(Shader.Find("Standard"));
+            AssetDatabase.CreateAsset(mat, path);
+        }
+        mat.color = new Color(0.78f, 0.9f, 0.97f, 0.18f);
+        mat.SetFloat("_Glossiness", 0.95f);
+        mat.SetFloat("_Mode", 3f); // Transparent
+        mat.SetOverrideTag("RenderType", "Transparent");
+        mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.One);
+        mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+        mat.SetInt("_ZWrite", 0);
+        mat.DisableKeyword("_ALPHATEST_ON");
+        mat.DisableKeyword("_ALPHABLEND_ON");
+        mat.EnableKeyword("_ALPHAPREMULTIPLY_ON");
+        mat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+        EditorUtility.SetDirty(mat);
+        return mat;
+    }
+
     // Image des écrans : sans éclairage, pour rester lisible dans une salle sombre (texture donnée en jeu par ClassStream)
     static Material DisplayMaterial()
     {
@@ -987,6 +1163,7 @@ public static class CampusMapBuilder
             AssetDatabase.CreateAsset(mat, path);
         }
         mat.shader = shader;
+        mat.enableInstancing = true;
         mat.color = color;
         mat.SetFloat("_Glossiness", smoothness);
         if (triplanar != null)

@@ -36,6 +36,8 @@ public class GameHud : MonoBehaviour
     AspectRatioFitter sharePreviewAspect;
 
     readonly Dictionary<NetworkPlayer, RectTransform> tags = new Dictionary<NetworkPlayer, RectTransform>();
+    readonly Dictionary<NetworkPlayer, Text> tagTexts = new Dictionary<NetworkPlayer, Text>();
+    readonly List<NetworkPlayer> goneTags = new List<NetworkPlayer>();
     readonly Dictionary<NetworkPlayer, string> announced = new Dictionary<NetworkPlayer, string>();
     NetworkPlayer[] players = new NetworkPlayer[0];
     float nextRefresh;
@@ -247,11 +249,15 @@ public class GameHud : MonoBehaviour
     void UpdateNameTags()
     {
         Camera cam = Camera.main;
-        foreach (var dead in tags.Keys.Where(p => p == null).ToList())
+        foreach (NetworkPlayer p in tags.Keys)
+            if (p == null) goneTags.Add(p);
+        foreach (NetworkPlayer dead in goneTags)
         {
             if (tags[dead] != null) Destroy(tags[dead].gameObject);
             tags.Remove(dead);
+            tagTexts.Remove(dead);
         }
+        goneTags.Clear();
         if (cam == null) return;
         // Vue sur l'écran du bureau : pas de pseudos par-dessus
         bool focused = CameraFollow.Instance != null && CameraFollow.Instance.IsFocused;
@@ -261,15 +267,22 @@ public class GameHud : MonoBehaviour
         foreach (NetworkPlayer p in players)
         {
             if (p == null || !p.IsSpawned) continue;
-            if (!tags.TryGetValue(p, out RectTransform tag)) tags[p] = tag = CreateTag(p);
+            if (!tags.TryGetValue(p, out RectTransform tag))
+            {
+                tags[p] = tag = CreateTag(p);
+                tagTexts[p] = tag.GetComponentInChildren<Text>();
+            }
 
             Vector3 world = p.transform.position + Vector3.up * (p.SeatIndex.Value >= 0 ? 1.65f : 2.15f);
             Vector3 screen = cam.WorldToScreenPoint(world);
-            bool visible = !focused && !(firstPerson && p.IsOwner) && screen.z > 0f && screen.z < nameTagDistance;
+            // Pas de pseudo pour les joueurs d'un autre étage (cachés par FloorLevel)
+            bool visible = !focused && !(firstPerson && p.IsOwner) && screen.z > 0f && screen.z < nameTagDistance
+                           && (p.IsOwner || FloorLevel.SameFloor(p.transform));
             tag.gameObject.SetActive(visible);
             if (!visible) continue;
 
-            tag.GetComponentInChildren<Text>().text = p.PlayerName.Value.ToString();
+            Text label = tagTexts[p];
+            if (label.text.Length == 0) label.text = p.PlayerName.Value.ToString(); // le pseudo arrive une fois, puis ne change plus
             tag.anchoredPosition = new Vector2(screen.x, screen.y) / scale;
             // Plus petit au loin
             float s = Mathf.Lerp(1f, 0.6f, Mathf.InverseLerp(6f, nameTagDistance, screen.z));

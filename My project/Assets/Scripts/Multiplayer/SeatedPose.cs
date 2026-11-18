@@ -2,7 +2,7 @@ using UnityEngine;
 
 // Pose assise par IK (pas d'animation "assis" dans le projet) : le bassin descend sur la chaise, les pieds restent
 // au sol devant, les mains se posent sur le bureau. Sur l'objet de l'Animator (OnAnimatorIK), avec "IK Pass" activé
-// sur le calque du contrôleur (AnimationTestSceneBuilder.CreatePlayerController).
+// sur le calque du contrôleur (CharacterSetup.CreatePlayerController).
 [RequireComponent(typeof(Animator))]
 public class SeatedPose : MonoBehaviour
 {
